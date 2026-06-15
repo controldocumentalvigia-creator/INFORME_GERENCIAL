@@ -193,17 +193,42 @@ def first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
 
 
 def money_to_number(s: pd.Series) -> pd.Series:
+    """Convierte valores monetarios a número.
+
+    Regla principal para Colombia: punto = miles, coma = decimal.
+    También soporta números ya numéricos y textos simples.
+    """
     if pd.api.types.is_numeric_dtype(s):
         return pd.to_numeric(s, errors="coerce").fillna(0)
-    cleaned = (
-        s.astype(str)
-        .str.replace("COP", "", regex=False)
-        .str.replace("$", "", regex=False)
-        .str.replace(r"[^0-9,\.\-]", "", regex=True)
-        .str.replace(".", "", regex=False)
-        .str.replace(",", ".", regex=False)
-    )
-    return pd.to_numeric(cleaned, errors="coerce").fillna(0)
+
+    def parse_one(v):
+        if pd.isna(v):
+            return 0.0
+        txt = str(v).strip()
+        if txt == "":
+            return 0.0
+        txt = txt.replace("COP", "").replace("$", "").replace(" ", "")
+        txt = re.sub(r"[^0-9,.-]", "", txt)
+        if txt in ["", "-", ",", "."]:
+            return 0.0
+        # Si tiene coma, se interpreta como formato colombiano: 1.234.567,89
+        if "," in txt:
+            txt = txt.replace(".", "").replace(",", ".")
+        else:
+            # Si tiene más de un punto, son separadores de miles: 1.234.567
+            if txt.count(".") > 1:
+                txt = txt.replace(".", "")
+            # Si tiene un punto y exactamente 3 dígitos después, probablemente es miles: 123.456
+            elif txt.count(".") == 1:
+                left, right = txt.split(".")
+                if len(right) == 3 and len(left) <= 3:
+                    txt = left + right
+        try:
+            return float(txt)
+        except Exception:
+            return 0.0
+
+    return s.apply(parse_one).astype(float).fillna(0)
 
 
 def fmt_cop(value: float) -> str:
@@ -349,6 +374,8 @@ def prepare_data(df_raw: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional
             df[out] = df[out].replace(["", "nan", "None", "NaN"], "Sin dato")
         else:
             df[out] = "Sin dato"
+        if key == "tray_prop":
+            df[out] = df[out].apply(classify_tray_prop)
 
     estado = colmap.get("estado_op")
     if estado:
@@ -356,6 +383,28 @@ def prepare_data(df_raw: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional
         df = df[~norm_estado.eq("ANULADO")].copy()
 
     return df, colmap
+
+
+def classify_tray_prop(value: object) -> str:
+    """Clasifica TRAY. PROP para evitar ejes 0/1 y hacer lectura gerencial.
+
+    Convención usada cuando la base trae binario:
+    1 = FLOTA PROPIA, 0 = TERCEROS.
+    Si el valor ya viene en texto, respeta propio/tercero.
+    """
+    txt = normalize_text(value)
+    if txt in ["", "SIN DATO", "NAN", "NONE"]:
+        return "Sin dato"
+    if txt in ["1", "1.0", "SI", "S", "TRUE", "VERDADERO"]:
+        return "FLOTA PROPIA"
+    if txt in ["0", "0.0", "NO", "N", "FALSE", "FALSO"]:
+        return "TERCEROS"
+    if "TERCER" in txt:
+        return "TERCEROS"
+    if "PROPI" in txt or "FLOTA" in txt:
+        return "FLOTA PROPIA"
+    return str(value).strip() if str(value).strip() else "Sin dato"
+
 
 
 def period_col(periodo: str) -> str:
@@ -404,21 +453,65 @@ def apply_filter(df: pd.DataFrame, label: str, col: str, key: str, max_opts: int
     return df, []
 
 
-def chart_bar(data: pd.DataFrame, x: str, y: str, title: str, top: int = 20, key: Optional[str] = None) -> None:
+
+
+def apply_selected_filters_for_comparison(df_source: pd.DataFrame, include_month: bool = False) -> pd.DataFrame:
+    """Reconstruye una base comparativa con los filtros seleccionados.
+
+    Se usa especialmente para variaciones vs periodo anterior.
+    Cuando el usuario selecciona un mes específico, el KPI usa ese mes,
+    pero la comparación necesita consultar el mes anterior con los mismos filtros.
+    """
+    d = df_source.copy()
+    filter_map = [
+        ("flt_anio", "__ANIO__"),
+        ("flt_mes_revisar", "__MES__"),
+        ("flt_cliente", "__CLIENTE__"),
+        ("flt_coordinador", "__COORDINADOR__"),
+        ("flt_usuario", "__USUARIO__"),
+        ("flt_linea", "__LINEA_NEG__"),
+        ("flt_tipo_negocio", "__TIPO_NEGOCIO__"),
+        ("flt_tray_prop", "__TRAY_PROP__"),
+        ("flt_estado", "__ESTADO_OP__"),
+        ("flt_tipo_vehiculo", "__TIPO_VEHICULO__"),
+        ("flt_placa", "__PLACA__"),
+        ("flt_conductor", "__CONDUCTOR__"),
+        ("flt_origen", "__ORIGEN__"),
+        ("flt_destino", "__DESTINO__"),
+    ]
+    for key_name, col_name in filter_map:
+        if col_name not in d.columns:
+            continue
+        val = st.session_state.get(key_name, [])
+        if key_name == "flt_mes_revisar":
+            if not include_month and val != "Todos":
+                continue
+            if val and val != "Todos":
+                d = d[d[col_name].astype(str).eq(str(val))].copy()
+        else:
+            if isinstance(val, list) and val:
+                d = d[d[col_name].astype(str).isin([str(x) for x in val])].copy()
+    return d
+
+def chart_bar(data: pd.DataFrame, x: str, y: str, title: str, top: int = 20, key: Optional[str] = None, ascending: bool = False) -> None:
     if data.empty or x not in data.columns or y not in data.columns:
         st.info("Sin datos para graficar.")
         return
-    d = data.sort_values(y, ascending=False).head(top).copy()
+    # ascending=False: Top mayores. ascending=True: Top menores.
+    d = data.sort_values(y, ascending=ascending).head(top).copy()
     d["__LABEL__"] = d[y].apply(lambda v: value_label(v, y))
-    key = unique_plot_key("bar", key or "auto", title, x, y, top)
+    key = unique_plot_key("bar", key or "auto", title, x, y, top, "asc" if ascending else "desc")
     if PLOTLY_OK:
         fig = px.bar(d, x=x, y=y, text="__LABEL__", title=title)
-        fig.update_layout(
-            height=430, plot_bgcolor="white", paper_bgcolor="white", title_font_size=18,
-            yaxis=dict(title=y, tickprefix="$ " if y in ["Facturación", "Costos", "Margen"] else "", tickformat=",.0f" if y in ["Facturación", "Costos", "Margen", "Servicios"] else ".0%" if y == "Rentabilidad" else None),
-        )
+        fig.update_layout(height=430, plot_bgcolor="white", paper_bgcolor="white", title_font_size=18)
         fig.update_traces(marker_color="#0B4F78", textposition="outside", cliponaxis=False, hovertemplate=f"%{{x}}<br>{y}: %{{text}}<extra></extra>")
         fig = apply_dark_plotly_theme(fig)
+        if y in ["Facturación", "Costos", "Margen", "Variación $", "Valor Actual", "Valor Anterior"]:
+            fig.update_yaxes(title_text=y, tickprefix="$ ", tickformat=",.0f")
+        elif y == "Rentabilidad" or "%" in y:
+            fig.update_yaxes(title_text=y, tickformat=".1%")
+        else:
+            fig.update_yaxes(title_text=y, tickformat=",.0f")
         st.plotly_chart(fig, use_container_width=True, key=key)
     else:
         st.subheader(title)
@@ -497,8 +590,32 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
+def ordered_periods(values: List[str], periodo: str = "Mensual") -> List[str]:
+    def period_sort_key(v: str):
+        v = str(v)
+        if v == "Sin fecha":
+            return (9999, 99)
+        m = re.match(r"^(\d{4})-(\d{2})$", v)
+        if m:
+            return (int(m.group(1)), int(m.group(2)))
+        m = re.match(r"^(\d{4})-B(\d+)$", v)
+        if m:
+            return (int(m.group(1)), int(m.group(2)) * 2)
+        m = re.match(r"^(\d{4})-T(\d+)$", v)
+        if m:
+            return (int(m.group(1)), int(m.group(2)) * 3)
+        m = re.match(r"^(\d{4})-S(\d+)$", v)
+        if m:
+            return (int(m.group(1)), int(m.group(2)) * 6)
+        if re.match(r"^\d{4}$", v):
+            return (int(v), 12)
+        return (9998, v)
+    return sorted([str(x) for x in values], key=period_sort_key)
+
+
+
 def variation_table(df: pd.DataFrame, group_col: str, pcol: str, value_col: str) -> pd.DataFrame:
-    periods = sorted([p for p in df[pcol].dropna().astype(str).unique().tolist() if p != "Sin fecha"])
+    periods = ordered_periods([p for p in df[pcol].dropna().astype(str).unique().tolist() if p != "Sin fecha"])
     if len(periods) < 2:
         return pd.DataFrame()
     prev_p, curr_p = periods[-2], periods[-1]
@@ -517,7 +634,11 @@ def variation_table(df: pd.DataFrame, group_col: str, pcol: str, value_col: str)
 
 
 def period_summary(df: pd.DataFrame, pcol: str) -> pd.DataFrame:
-    fin = aggregate(df, [pcol]).sort_values(pcol).copy()
+    fin = aggregate(df, [pcol]).copy()
+    if not fin.empty:
+        order = ordered_periods(fin[pcol].dropna().astype(str).unique().tolist())
+        fin["__ORDER__"] = pd.Categorical(fin[pcol].astype(str), categories=order, ordered=True)
+        fin = fin.sort_values("__ORDER__").drop(columns=["__ORDER__"])
     if fin.empty:
         return fin
     fin["Var Facturación %"] = fin["Facturación"].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
@@ -570,7 +691,7 @@ def executive_summary(df: pd.DataFrame, pcol: str) -> str:
     by_cliente = aggregate(df, ["__CLIENTE__"]).sort_values("Facturación", ascending=False)
     top_client = by_cliente.iloc[0]["__CLIENTE__"] if not by_cliente.empty else "Sin dato"
     top_part = by_cliente.iloc[0]["Facturación"] / fact if fact and not by_cliente.empty else 0
-    periods = sorted([p for p in df[pcol].dropna().astype(str).unique() if p != "Sin fecha"])
+    periods = ordered_periods([p for p in df[pcol].dropna().astype(str).unique() if p != "Sin fecha"])
     trend = "No hay periodos suficientes para comparar tendencia."
     if len(periods) >= 2:
         prev_p, curr_p = periods[-2], periods[-1]
@@ -702,6 +823,10 @@ with st.sidebar:
     st.caption(f"Registros cargados: {len(df_base):,}".replace(",", "."))
     st.caption(f"Registros filtrados: {len(df):,}".replace(",", "."))
 
+# Base comparativa: conserva los mismos filtros, pero sin limitar al mes seleccionado.
+# Así las variaciones vs periodo anterior siguen funcionando cuando se elige un mes específico.
+df_compare = apply_selected_filters_for_comparison(df_base, include_month=False)
+
 if df.empty:
     st.warning("No hay registros con los filtros seleccionados.")
     st.stop()
@@ -742,9 +867,19 @@ with cols[2]: make_kpi("Vehículos Activos", fmt_num(vehiculos), "Placas únicas
 with cols[3]: make_kpi("Conductores Activos", fmt_num(conductores), "Conductores únicos")
 
 # Información de columnas detectadas
-with st.expander("Columnas detectadas en la base"):
+with st.expander("Columnas detectadas y reglas matemáticas aplicadas"):
     detect = pd.DataFrame([{"Campo estándar": k, "Columna encontrada": v or "No encontrada"} for k, v in colmap.items()])
     st.dataframe(detect, use_container_width=True)
+    st.markdown("""
+    **Reglas validadas:**  
+    - Producción = conteo de registros no anulados.  
+    - Facturación = suma de V.CLIENTE.  
+    - Costos = suma de V.CONDUCT.  
+    - Margen = Facturación - Costos.  
+    - Rentabilidad % = Margen / Facturación.  
+    - La rentabilidad agregada se calcula sobre totales, no como promedio simple de filas.  
+    - ESTADO OP = ANULADO se excluye de KPIs, producción, facturación y rentabilidad.
+    """)
 
 # Tabs
 tabs = st.tabs([
@@ -761,8 +896,8 @@ tabs = st.tabs([
 
 with tabs[0]:
     st.markdown("### Resumen Ejecutivo Automático")
-    st.markdown(f"<div class='card'>{executive_summary(df, pcol)}</div>", unsafe_allow_html=True)
-    g_period = period_summary(df, pcol)
+    st.markdown(f"<div class='card'>{executive_summary(df_compare if not df_compare.empty else df, pcol)}</div>", unsafe_allow_html=True)
+    g_period = period_summary(df_compare if not df_compare.empty else df, pcol)
     c1, c2 = st.columns(2)
     with c1:
         chart_financial_combo(g_period, pcol, f"Facturación y Margen - {periodo}", key=safe_key("combo_resumen", periodo, len(df)))
@@ -783,7 +918,7 @@ with tabs[1]:
     with c1:
         chart_bar(clientes_tbl, "__CLIENTE__", "Facturación", "Top 10 Clientes por Facturación", 10)
     with c2:
-        chart_bar(clientes_tbl.sort_values("Rentabilidad", ascending=False), "__CLIENTE__", "Rentabilidad", "Top 10 Clientes por Rentabilidad", 10)
+        chart_bar(clientes_tbl[clientes_tbl["Facturación"] > 0].sort_values("Rentabilidad", ascending=False), "__CLIENTE__", "Rentabilidad", "Top 10 Clientes por Rentabilidad", 10)
     evolucion = aggregate(df, [pcol, "__CLIENTE__"])
     top_clients = clientes_tbl.head(8)["__CLIENTE__"].tolist()
     chart_line(evolucion[evolucion["__CLIENTE__"].isin(top_clients)], pcol, "Facturación", "Evolución de Facturación por Cliente", "__CLIENTE__")
@@ -814,7 +949,7 @@ with tabs[2]:
         chart_bar(destino_tbl, "__DESTINO__", "Servicios", "Top Destinos", 20)
 
 with tabs[3]:
-    fin = period_summary(df, pcol)
+    fin = period_summary(df_compare if not df_compare.empty else df, pcol)
     chart_financial_combo(fin, pcol, f"Análisis Financiero {periodo} con Variación vs Periodo Anterior", key=safe_key("combo_financiero", periodo, len(df)))
     if PLOTLY_OK and not fin.empty:
         fig_var = px.bar(fin, x=pcol, y="Var Facturación %", text="Variación Facturación", title="Subidas y Bajadas de Facturación vs Periodo Anterior")
@@ -825,17 +960,19 @@ with tabs[3]:
     elif not fin.empty:
         st.bar_chart(fin.set_index(pcol)["Var Facturación %"])
     show_table(fin.rename(columns={pcol: "Periodo"}), "Tabla Financiera por Periodo")
-    var_fact = variation_table(df, "__CLIENTE__", pcol, "__V_CLIENTE__")
+    var_fact = variation_table(df_compare if not df_compare.empty else df, "__CLIENTE__", pcol, "__V_CLIENTE__")
     if not var_fact.empty:
         show_table(var_fact.rename(columns={"__CLIENTE__": "Cliente"}), "Variación de Facturación por Cliente")
 
 with tabs[4]:
-    rent_cliente = aggregate(df, ["__CLIENTE__"]).sort_values("Rentabilidad", ascending=False)
+    rent_cliente = aggregate(df, ["__CLIENTE__"])
+    rent_cliente = rent_cliente[rent_cliente["Facturación"] > 0].copy()
+    rent_cliente = rent_cliente.sort_values("Rentabilidad", ascending=False)
     c1, c2 = st.columns(2)
     with c1:
-        chart_bar(rent_cliente.head(20), "__CLIENTE__", "Rentabilidad", "Top 20 Más Rentables", 20)
+        chart_bar(rent_cliente, "__CLIENTE__", "Rentabilidad", "Top 20 Más Rentables", 20, key="rent_clientes_mas", ascending=False)
     with c2:
-        chart_bar(rent_cliente.sort_values("Rentabilidad", ascending=True).head(20), "__CLIENTE__", "Rentabilidad", "Top 20 Menos Rentables", 20)
+        chart_bar(rent_cliente, "__CLIENTE__", "Rentabilidad", "Top 20 Menos Rentables", 20, key="rent_clientes_menos", ascending=True)
     c3, c4 = st.columns(2)
     with c3:
         placa_margin = aggregate(df, ["__PLACA__"]).query("__PLACA__ != 'Sin dato'").sort_values("Margen", ascending=False)
@@ -900,7 +1037,7 @@ with tabs[7]:
 with tabs[8]:
     st.markdown("### Centro de Alertas Ejecutivas")
     alerts: List[Tuple[str, str]] = []
-    var_tbl = variation_table(df, "__CLIENTE__", pcol, "__V_CLIENTE__")
+    var_tbl = variation_table(df_compare if not df_compare.empty else df, "__CLIENTE__", pcol, "__V_CLIENTE__")
     if not var_tbl.empty:
         for _, r in var_tbl[var_tbl["Variación %"] <= -0.20].head(10).iterrows():
             alerts.append(("red", f"🔴 Cliente {r['__CLIENTE__']} presenta caída de {fmt_pct(r['Variación %'])} en facturación."))
