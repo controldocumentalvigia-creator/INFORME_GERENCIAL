@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import re
+import hashlib
 import unicodedata
 from typing import Dict, List, Optional, Tuple
 
@@ -183,6 +184,33 @@ def fmt_num(value: float) -> str:
         return "0"
 
 
+
+
+def safe_key(*parts: object) -> str:
+    raw = "_".join(str(p) for p in parts)
+    raw = re.sub(r"[^A-Za-z0-9_]+", "_", raw)[:80]
+    digest = hashlib.md5("|".join(str(p) for p in parts).encode("utf-8")).hexdigest()[:8]
+    return f"{raw}_{digest}"
+
+
+def value_label(value: float, metric: str) -> str:
+    if metric in ["Facturación", "Costos", "Margen", "Variación $", "Valor Actual", "Valor Anterior"] or "__V_CLIENTE__" in metric or "__MARGEN__" in metric:
+        return fmt_cop(value)
+    if metric in ["Rentabilidad", "Participación", "Variación %", "Crecimiento"]:
+        return fmt_pct(value)
+    return fmt_num(value)
+
+
+def variation_arrow(value: float) -> str:
+    if not np.isfinite(value):
+        return "—"
+    if value > 0:
+        return "▲ " + fmt_pct(value)
+    if value < 0:
+        return "▼ " + fmt_pct(value)
+    return "■ 0,00 %"
+
+
 def make_kpi(title: str, value: str, note: str = "") -> None:
     st.markdown(
         f"""
@@ -299,7 +327,10 @@ def aggregate(df: pd.DataFrame, group_cols: List[str]) -> pd.DataFrame:
     return g
 
 
-def apply_filter(df: pd.DataFrame, label: str, col: str, max_opts: int = 10000) -> pd.DataFrame:
+def apply_filter(df: pd.DataFrame, label: str, col: str, key: str, max_opts: int = 10000) -> Tuple[pd.DataFrame, List[str]]:
+    """Filtro encadenado. Las opciones se recalculan con la base ya filtrada y limpia selecciones inválidas."""
+    if col not in df.columns:
+        return df, []
     vals = df[col].dropna().astype(str).unique().tolist()
     if col == "__MES__":
         vals = [m for m in MESES_ORDEN if m in vals]
@@ -307,25 +338,38 @@ def apply_filter(df: pd.DataFrame, label: str, col: str, max_opts: int = 10000) 
         vals = sorted(vals)
     if len(vals) > max_opts:
         vals = vals[:max_opts]
-    selected = st.sidebar.multiselect(label, vals, default=[])
+
+    prev = st.session_state.get(key, [])
+    valid_prev = [v for v in prev if v in vals]
+    if prev != valid_prev:
+        st.session_state[key] = valid_prev
+
+    selected = st.sidebar.multiselect(label, vals, default=valid_prev, key=key)
     if selected:
-        return df[df[col].astype(str).isin(selected)].copy()
-    return df
+        return df[df[col].astype(str).isin(selected)].copy(), selected
+    return df, []
 
 
-def chart_bar(data: pd.DataFrame, x: str, y: str, title: str, top: int = 20) -> None:
+def chart_bar(data: pd.DataFrame, x: str, y: str, title: str, top: int = 20, key: Optional[str] = None) -> None:
     if data.empty or x not in data.columns or y not in data.columns:
         st.info("Sin datos para graficar.")
         return
     d = data.sort_values(y, ascending=False).head(top).copy()
+    d["__LABEL__"] = d[y].apply(lambda v: value_label(v, y))
+    if key is None:
+        key = safe_key("bar", title, x, y, top)
     if PLOTLY_OK:
-        fig = px.bar(d, x=x, y=y, text_auto=".2s", title=title)
-        fig.update_layout(height=430, plot_bgcolor="white", paper_bgcolor="white", title_font_size=18)
-        fig.update_traces(marker_color="#0B4F78")
-        st.plotly_chart(fig, use_container_width=True)
+        fig = px.bar(d, x=x, y=y, text="__LABEL__", title=title)
+        fig.update_layout(
+            height=430, plot_bgcolor="white", paper_bgcolor="white", title_font_size=18,
+            yaxis=dict(title=y, tickprefix="$ " if y in ["Facturación", "Costos", "Margen"] else "", tickformat=",.0f" if y in ["Facturación", "Costos", "Margen", "Servicios"] else ".0%" if y == "Rentabilidad" else None),
+        )
+        fig.update_traces(marker_color="#0B4F78", textposition="outside", cliponaxis=False, hovertemplate=f"%{{x}}<br>{y}: %{{text}}<extra></extra>")
+        st.plotly_chart(fig, use_container_width=True, key=key)
     else:
         st.subheader(title)
         st.bar_chart(d.set_index(x)[y])
+
 
 
 def chart_line(data: pd.DataFrame, x: str, y: str, title: str, color: Optional[str] = None) -> None:
@@ -336,7 +380,7 @@ def chart_line(data: pd.DataFrame, x: str, y: str, title: str, color: Optional[s
     if PLOTLY_OK:
         fig = px.line(d, x=x, y=y, color=color, markers=True, title=title)
         fig.update_layout(height=430, plot_bgcolor="white", paper_bgcolor="white", title_font_size=18)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=safe_key("line", title, x, y, color or ""))
     else:
         st.subheader(title)
         if color and color in d.columns:
@@ -364,7 +408,7 @@ def chart_heatmap(data: pd.DataFrame, index: str, columns: str, values: str, tit
             title=title,
         )
         fig.update_layout(height=max(420, min(900, 90 + 26 * len(pivot))), title_font_size=18)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=safe_key("heatmap", title, index, columns, values))
     else:
         st.subheader(title)
         st.dataframe(pivot.style.background_gradient(cmap="RdYlGn", axis=None), use_container_width=True, height=520)
@@ -379,7 +423,7 @@ def show_table(df: pd.DataFrame, title: str, height: int = 420) -> None:
     for col in show.columns:
         if col in ["Facturación", "Costos", "Margen", "Variación $", "Valor Actual", "Valor Anterior"]:
             show[col] = show[col].apply(fmt_cop)
-        elif col in ["Rentabilidad", "Participación", "Variación %", "Crecimiento"]:
+        elif col in ["Rentabilidad", "Participación", "Variación %", "Crecimiento", "Var Facturación %", "Var Margen %", "Var Servicios %"]:
             show[col] = show[col].apply(fmt_pct)
     if AGGRID_OK:
         gb = GridOptionsBuilder.from_dataframe(show)
@@ -412,6 +456,51 @@ def variation_table(df: pd.DataFrame, group_col: str, pcol: str, value_col: str)
     piv["Variación $"] = piv["Valor Actual"] - piv["Valor Anterior"]
     piv["Variación %"] = np.where(piv["Valor Anterior"].ne(0), piv["Variación $"] / piv["Valor Anterior"], np.where(piv["Valor Actual"].ne(0), 1, 0))
     return piv[[group_col, "Valor Anterior", "Valor Actual", "Variación $", "Variación %"]].sort_values("Variación %")
+
+
+
+
+def period_summary(df: pd.DataFrame, pcol: str) -> pd.DataFrame:
+    fin = aggregate(df, [pcol]).sort_values(pcol).copy()
+    if fin.empty:
+        return fin
+    fin["Var Facturación %"] = fin["Facturación"].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
+    fin["Var Margen %"] = fin["Margen"].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
+    fin["Var Servicios %"] = fin["Servicios"].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
+    fin["Variación Facturación"] = fin["Var Facturación %"].apply(variation_arrow)
+    fin["Variación Margen"] = fin["Var Margen %"].apply(variation_arrow)
+    fin["Variación Servicios"] = fin["Var Servicios %"].apply(variation_arrow)
+    return fin
+
+
+def chart_financial_combo(fin: pd.DataFrame, pcol: str, title: str, key: str) -> None:
+    if fin.empty:
+        st.info("Sin datos financieros para graficar.")
+        return
+    if PLOTLY_OK:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=fin[pcol], y=fin["Facturación"], name="Facturación",
+            text=fin["Facturación"].apply(fmt_cop), textposition="outside", marker_color="#0B4F78",
+            hovertemplate="Periodo: %{x}<br>Facturación: %{text}<extra></extra>"
+        ))
+        fig.add_trace(go.Scatter(
+            x=fin[pcol], y=fin["Margen"], name="Margen", mode="lines+markers+text",
+            text=fin["Variación Facturación"], textposition="top center", yaxis="y2", line=dict(color="#60A5FA", width=3),
+            hovertemplate="Periodo: %{x}<br>Margen: %{customdata}<br>Variación facturación vs anterior: %{text}<extra></extra>",
+            customdata=fin["Margen"].apply(fmt_cop)
+        ))
+        fig.update_layout(
+            title=title, height=470, plot_bgcolor="white", paper_bgcolor="white",
+            yaxis=dict(title="Facturación", tickprefix="$ ", tickformat=",.0f"),
+            yaxis2=dict(title="Margen", overlaying="y", side="right", tickprefix="$ ", tickformat=",.0f"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            margin=dict(t=80, b=40, l=40, r=40),
+        )
+        st.plotly_chart(fig, use_container_width=True, key=key)
+    else:
+        st.subheader(title)
+        st.line_chart(fin.set_index(pcol)[["Facturación", "Margen"]])
 
 
 def executive_summary(df: pd.DataFrame, pcol: str) -> str:
@@ -506,20 +595,25 @@ with st.sidebar:
     pcol = period_col(periodo)
 
     df = df_base.copy()
-    df = apply_filter(df, "Año", "__ANIO__")
-    df = apply_filter(df, "Mes", "__MES__")
-    df = apply_filter(df, "Cliente", "__CLIENTE__")
-    df = apply_filter(df, "Coordinador", "__COORDINADOR__")
-    df = apply_filter(df, "Usuario / Creado Por", "__USUARIO__")
-    df = apply_filter(df, "Línea de Negocio", "__LINEA_NEG__")
-    df = apply_filter(df, "Tipo de Negocio", "__TIPO_NEGOCIO__")
-    df = apply_filter(df, "Trayecto Propio / Tercero", "__TRAY_PROP__")
-    df = apply_filter(df, "Estado Operativo", "__ESTADO_OP__")
-    df = apply_filter(df, "Tipo Vehículo", "__TIPO_VEHICULO__")
-    df = apply_filter(df, "Placa", "__PLACA__")
-    df = apply_filter(df, "Conductor", "__CONDUCTOR__")
-    df = apply_filter(df, "Origen", "__ORIGEN__")
-    df = apply_filter(df, "Destino", "__DESTINO__")
+    if st.button("🔄 Limpiar filtros", use_container_width=True):
+        for k in list(st.session_state.keys()):
+            if k.startswith("flt_"):
+                del st.session_state[k]
+        st.rerun()
+    df, _ = apply_filter(df, "Año", "__ANIO__", "flt_anio")
+    df, _ = apply_filter(df, "Mes", "__MES__", "flt_mes")
+    df, _ = apply_filter(df, "Cliente", "__CLIENTE__", "flt_cliente")
+    df, _ = apply_filter(df, "Coordinador", "__COORDINADOR__", "flt_coordinador")
+    df, _ = apply_filter(df, "Usuario / Creado Por", "__USUARIO__", "flt_usuario")
+    df, _ = apply_filter(df, "Línea de Negocio", "__LINEA_NEG__", "flt_linea")
+    df, _ = apply_filter(df, "Tipo de Negocio", "__TIPO_NEGOCIO__", "flt_tipo_negocio")
+    df, _ = apply_filter(df, "Trayecto Propio / Tercero", "__TRAY_PROP__", "flt_tray_prop")
+    df, _ = apply_filter(df, "Estado Operativo", "__ESTADO_OP__", "flt_estado")
+    df, _ = apply_filter(df, "Tipo Vehículo", "__TIPO_VEHICULO__", "flt_tipo_vehiculo")
+    df, _ = apply_filter(df, "Placa", "__PLACA__", "flt_placa")
+    df, _ = apply_filter(df, "Conductor", "__CONDUCTOR__", "flt_conductor")
+    df, _ = apply_filter(df, "Origen", "__ORIGEN__", "flt_origen")
+    df, _ = apply_filter(df, "Destino", "__DESTINO__", "flt_destino")
     st.markdown("---")
     st.caption(f"Registros cargados: {len(df_base):,}".replace(",", "."))
     st.caption(f"Registros filtrados: {len(df):,}".replace(",", "."))
@@ -570,18 +664,10 @@ tabs = st.tabs([
 with tabs[0]:
     st.markdown("### Resumen Ejecutivo Automático")
     st.markdown(f"<div class='card'>{executive_summary(df, pcol)}</div>", unsafe_allow_html=True)
-    g_period = aggregate(df, [pcol]).sort_values(pcol)
+    g_period = period_summary(df, pcol)
     c1, c2 = st.columns(2)
     with c1:
-        if PLOTLY_OK:
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=g_period[pcol], y=g_period["Facturación"], name="Facturación"))
-            fig.add_trace(go.Scatter(x=g_period[pcol], y=g_period["Margen"], mode="lines+markers", name="Margen", yaxis="y2"))
-            fig.update_layout(title=f"Facturación y Margen - {periodo}", yaxis=dict(title="Facturación"), yaxis2=dict(title="Margen", overlaying="y", side="right"), height=430, plot_bgcolor="white")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.subheader(f"Facturación y Margen - {periodo}")
-            st.line_chart(g_period.set_index(pcol)[["Facturación", "Margen"]])
+        chart_financial_combo(g_period, pcol, f"Facturación y Margen - {periodo}", key=safe_key("combo_resumen", periodo, len(df)))
     with c2:
         chart_heatmap(df, "__CLIENTE__", pcol, "__V_CLIENTE__", "Mapa de Calor: Cliente vs Periodo - Facturación")
     c3, c4 = st.columns(2)
@@ -630,17 +716,15 @@ with tabs[2]:
         chart_bar(destino_tbl, "__DESTINO__", "Servicios", "Top Destinos", 20)
 
 with tabs[3]:
-    fin = aggregate(df, [pcol]).sort_values(pcol)
-    if PLOTLY_OK:
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=fin[pcol], y=fin["Facturación"], name="Facturación"))
-        fig.add_trace(go.Bar(x=fin[pcol], y=fin["Costos"], name="Costos"))
-        fig.add_trace(go.Scatter(x=fin[pcol], y=fin["Margen"], name="Margen", mode="lines+markers"))
-        fig.update_layout(title=f"Análisis Financiero {periodo}", barmode="group", height=470, plot_bgcolor="white")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.subheader(f"Análisis Financiero {periodo}")
-        st.line_chart(fin.set_index(pcol)[["Facturación", "Costos", "Margen"]])
+    fin = period_summary(df, pcol)
+    chart_financial_combo(fin, pcol, f"Análisis Financiero {periodo} con Variación vs Periodo Anterior", key=safe_key("combo_financiero", periodo, len(df)))
+    if PLOTLY_OK and not fin.empty:
+        fig_var = px.bar(fin, x=pcol, y="Var Facturación %", text="Variación Facturación", title="Subidas y Bajadas de Facturación vs Periodo Anterior")
+        fig_var.update_layout(height=390, plot_bgcolor="white", paper_bgcolor="white", yaxis=dict(title="Variación %", tickformat=".1%"))
+        fig_var.update_traces(marker_color=np.where(fin["Var Facturación %"] >= 0, "#16A34A", "#DC2626"), textposition="outside", hovertemplate="Periodo: %{x}<br>Variación: %{text}<extra></extra>")
+        st.plotly_chart(fig_var, use_container_width=True, key=safe_key("var_facturacion", periodo, len(df)))
+    elif not fin.empty:
+        st.bar_chart(fin.set_index(pcol)["Var Facturación %"])
     show_table(fin.rename(columns={pcol: "Periodo"}), "Tabla Financiera por Periodo")
     var_fact = variation_table(df, "__CLIENTE__", pcol, "__V_CLIENTE__")
     if not var_fact.empty:
@@ -700,7 +784,7 @@ with tabs[7]:
         map_agg = mdf.groupby(["__ORIGEN__", "lat", "lon"], as_index=False).agg(Servicios=("__SERVICIOS__", "sum"), Facturación=("__V_CLIENTE__", "sum"))
         fig = px.scatter_mapbox(map_agg, lat="lat", lon="lon", size="Servicios", color="Facturación", hover_name="__ORIGEN__", zoom=4, mapbox_style="carto-positron", title="Mapa Estratégico por Origen")
         fig.update_layout(height=620)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=safe_key("mapa_estrategico", len(mdf)))
     elif not mdf.empty:
         st.map(mdf[["lat", "lon"]])
     else:
