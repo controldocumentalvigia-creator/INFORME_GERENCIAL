@@ -178,6 +178,12 @@ def normalize_col(col: object) -> str:
 
 
 def first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    """Busca columnas candidatas.
+
+    Primero intenta coincidencia exacta normalizada; luego coincidencia parcial.
+    La validación fina de columnas sensibles, como conductor, se hace aparte para
+    evitar confundir VALOR CONDUCTOR / V.CONDUCT con el nombre del conductor.
+    """
     norm_map = {normalize_col(c): c for c in df.columns}
     for cand in candidates:
         key = normalize_col(cand)
@@ -189,6 +195,74 @@ def first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
             key = normalize_col(cand)
             if key and key in n:
                 return c
+    return None
+
+
+STRICT_CONDUCTOR_NAMES = {
+    "CONDUCTOR",
+    "CONDUCTO",
+    "NOMBRE CONDUCTOR",
+    "NOM CONDUCTOR",
+    "NOMBRE DEL CONDUCTOR",
+    "NOMBRE CONDUCTO",
+}
+
+BAD_CONDUCTOR_TOKENS = {
+    "VALOR", "V CLIENTE", "V CONDUCT", "VCONDUCT", "COSTO",
+    "FLETE", "TARIFA", "MARGEN", "RENTABILIDAD", "FACTURACION", "FACTURACIÓN"
+}
+
+
+def is_bad_conductor_column_name(col: object) -> bool:
+    n = normalize_col(col)
+    return any(tok in n for tok in BAD_CONDUCTOR_TOKENS)
+
+
+def numeric_ratio(series: pd.Series) -> float:
+    if series.empty:
+        return 0.0
+    sample = series.dropna().astype(str).str.strip()
+    sample = sample[sample.ne("")].head(1000)
+    if sample.empty:
+        return 0.0
+    nums = pd.to_numeric(sample.str.replace(r"[^0-9,.-]", "", regex=True).str.replace(",", ".", regex=False), errors="coerce")
+    return float(nums.notna().mean())
+
+
+def resolve_conductor_column(df: pd.DataFrame, current: Optional[str]) -> Optional[str]:
+    """Identifica la columna real del conductor sin confundirla con costos.
+
+    Problema corregido: algunas bases traen `VALOR CONDUCTOR` o `V.CONDUCT`;
+    por coincidencia parcial, eso podía quedar como `CONDUCTOR`, generando ejes
+    numéricos como 0.2, 0.4, 1B en el gráfico.
+    """
+    # 1) Coincidencia exacta fuerte por nombre normalizado.
+    norm_map = {normalize_col(c): c for c in df.columns}
+    for name in STRICT_CONDUCTOR_NAMES:
+        if name in norm_map and not is_bad_conductor_column_name(norm_map[name]):
+            return norm_map[name]
+
+    # 2) Si el actual no parece financiero ni numérico, se acepta.
+    if current and current in df.columns:
+        if not is_bad_conductor_column_name(current) and numeric_ratio(df[current]) < 0.80:
+            return current
+
+    # 3) Búsqueda flexible: columnas que mencionen conductor, excluyendo valores/costos.
+    candidates = []
+    for c in df.columns:
+        n = normalize_col(c)
+        if "CONDUCT" in n and not is_bad_conductor_column_name(c):
+            ratio = numeric_ratio(df[c])
+            score = 100 if n in STRICT_CONDUCTOR_NAMES else 50
+            score -= 40 if ratio > 0.80 else 0
+            # Preferimos texto con más valores diferentes.
+            unique_count = df[c].astype(str).str.strip().replace("", np.nan).nunique(dropna=True)
+            score += min(unique_count, 100) / 100
+            candidates.append((score, c))
+    if candidates:
+        candidates.sort(reverse=True, key=lambda x: x[0])
+        return candidates[0][1]
+
     return None
 
 
@@ -333,6 +407,9 @@ def prepare_data(df_raw: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional
     df.columns = [str(c).strip() for c in df.columns]
     df = df.dropna(how="all").copy()
     colmap = {k: first_existing(df, v) for k, v in COLUMN_CANDIDATES.items()}
+    # Corrección crítica: no permitir que VALOR CONDUCTOR / V.CONDUCT sea tomado
+    # como nombre del conductor.
+    colmap["conductor"] = resolve_conductor_column(df, colmap.get("conductor"))
 
     fecha = colmap.get("fecha")
     if fecha:
@@ -497,26 +574,57 @@ def chart_bar(data: pd.DataFrame, x: str, y: str, title: str, top: int = 20, key
     if data.empty or x not in data.columns or y not in data.columns:
         st.info("Sin datos para graficar.")
         return
-    # ascending=False: Top mayores. ascending=True: Top menores.
+
     d = data.sort_values(y, ascending=ascending).head(top).copy()
+    d[x] = d[x].astype(str).replace(["", "nan", "None", "NaN"], "Sin dato")
     d["__LABEL__"] = d[y].apply(lambda v: value_label(v, y))
-    key = unique_plot_key("bar", key or "auto", title, x, y, top, "asc" if ascending else "desc")
+    key = unique_plot_key("bar", key or "auto", title, x, y, top, "asc" if ascending else "desc", len(d))
+
+    # Para nombres largos, como clientes o conductores, se usa barra horizontal.
+    long_labels = d[x].astype(str).str.len().mean() > 12 if not d.empty else False
+    horizontal = x in ["__CONDUCTOR__", "__CLIENTE__", "__ORIGEN__", "__DESTINO__"] or long_labels
+
     if PLOTLY_OK:
-        fig = px.bar(d, x=x, y=y, text="__LABEL__", title=title)
-        fig.update_layout(height=430, plot_bgcolor="white", paper_bgcolor="white", title_font_size=18)
-        fig.update_traces(marker_color="#0B4F78", textposition="outside", cliponaxis=False, hovertemplate=f"%{{x}}<br>{y}: %{{text}}<extra></extra>")
-        fig = apply_dark_plotly_theme(fig)
-        if y in ["Facturación", "Costos", "Margen", "Variación $", "Valor Actual", "Valor Anterior"]:
-            fig.update_yaxes(title_text=y, tickprefix="$ ", tickformat=",.0f")
-        elif y == "Rentabilidad" or "%" in y:
-            fig.update_yaxes(title_text=y, tickformat=".1%")
+        if horizontal:
+            # Orden visual correcto: el primer registro queda arriba.
+            plot_df = d.iloc[::-1].copy()
+            fig = px.bar(plot_df, x=y, y=x, orientation="h", text="__LABEL__", title=title)
+            fig.update_yaxes(title_text="", tickfont=dict(size=11, color="#000000"))
+            fig.update_xaxes(title_text=y)
+            hovertemplate = f"%{{y}}<br>{y}: %{{text}}<extra></extra>"
         else:
-            fig.update_yaxes(title_text=y, tickformat=",.0f")
+            fig = px.bar(d, x=x, y=y, text="__LABEL__", title=title)
+            fig.update_xaxes(title_text=x, tickfont=dict(size=11, color="#000000"))
+            fig.update_yaxes(title_text=y)
+            hovertemplate = f"%{{x}}<br>{y}: %{{text}}<extra></extra>"
+
+        fig.update_layout(
+            height=470 if horizontal else 430,
+            plot_bgcolor="white",
+            paper_bgcolor="white",
+            title_font_size=18,
+            margin=dict(l=20, r=20, t=70, b=40),
+        )
+        fig.update_traces(
+            marker_color="#0B4F78",
+            textposition="outside",
+            cliponaxis=False,
+            hovertemplate=hovertemplate,
+        )
+        fig = apply_dark_plotly_theme(fig)
+
+        axis_to_format = fig.update_xaxes if horizontal else fig.update_yaxes
+        if y in ["Facturación", "Costos", "Margen", "Variación $", "Valor Actual", "Valor Anterior"]:
+            axis_to_format(title_text=y, tickprefix="$ ", tickformat=",.0f")
+        elif y == "Rentabilidad" or "%" in y:
+            axis_to_format(title_text=y, tickformat=".1%")
+        else:
+            axis_to_format(title_text=y, tickformat=",.0f")
+
         st.plotly_chart(fig, use_container_width=True, key=key)
     else:
         st.subheader(title)
         st.bar_chart(d.set_index(x)[y])
-
 
 
 def chart_line(data: pd.DataFrame, x: str, y: str, title: str, color: Optional[str] = None) -> None:
@@ -1063,3 +1171,4 @@ with tabs[8]:
 st.markdown("---")
 st.download_button("⬇️ Descargar base filtrada en Excel", to_excel_bytes(df), "base_filtrada_informe_gerencial.xlsx")
 st.caption("Informe Gerencial Ejecutivo | Streamlit Cloud | Base cargada dinámicamente por el usuario")
+
