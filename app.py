@@ -1086,22 +1086,103 @@ with tabs[3]:
         show_table(var_fact.rename(columns={"__CLIENTE__": "Cliente"}), "Variación de Facturación por Cliente")
 
 with tabs[4]:
+    st.markdown("### Análisis de Rentabilidad: eficiencia (%) vs aporte económico ($)")
+    st.info(
+        "La rentabilidad porcentual muestra eficiencia; el margen en pesos muestra la utilidad real. "
+        "Un cliente pequeño puede tener alta rentabilidad %, pero un cliente grande puede aportar mucho más margen en COP."
+    )
+
     rent_cliente = aggregate(df, ["__CLIENTE__"])
     rent_cliente = rent_cliente[rent_cliente["Facturación"] > 0].copy()
-    rent_cliente = rent_cliente.sort_values("Rentabilidad", ascending=False)
-    c1, c2 = st.columns(2)
-    with c1:
-        chart_bar(rent_cliente, "__CLIENTE__", "Rentabilidad", "Top 20 Más Rentables", 20, key="rent_clientes_mas", ascending=False)
-    with c2:
-        chart_bar(rent_cliente, "__CLIENTE__", "Rentabilidad", "Top 20 Menos Rentables", 20, key="rent_clientes_menos", ascending=True)
-    c3, c4 = st.columns(2)
-    with c3:
-        placa_margin = aggregate(df, ["__PLACA__"]).query("__PLACA__ != 'Sin dato'").sort_values("Margen", ascending=False)
-        chart_bar(placa_margin, "__PLACA__", "Margen", "Top 20 Mayor Margen por Placa", 20)
-    with c4:
-        tipo_rent = aggregate(df, ["__TIPO_VEHICULO__"]).sort_values("Rentabilidad", ascending=False)
-        chart_bar(tipo_rent, "__TIPO_VEHICULO__", "Rentabilidad", "Rentabilidad por Tipo Vehículo", 20)
-    show_table(rent_cliente.rename(columns={"__CLIENTE__": "Cliente"}), "Rentabilidad por Cliente")
+
+    if rent_cliente.empty:
+        st.info("Sin datos de clientes para analizar rentabilidad.")
+    else:
+        total_clientes_rent = len(rent_cliente)
+        top_n_rent = min(20, max(1, total_clientes_rent // 2)) if total_clientes_rent < 40 else 20
+
+        clientes_mas_rentables = rent_cliente.sort_values("Rentabilidad", ascending=False).head(top_n_rent).copy()
+        clientes_menos_rentables = rent_cliente.sort_values("Rentabilidad", ascending=True).head(top_n_rent).copy()
+        clientes_mayor_margen = rent_cliente.sort_values("Margen", ascending=False).head(20).copy()
+        clientes_mayor_facturacion = rent_cliente.sort_values("Facturación", ascending=False).head(20).copy()
+
+        c1, c2 = st.columns(2)
+        with c1:
+            chart_bar(
+                clientes_mas_rentables, "__CLIENTE__", "Rentabilidad",
+                f"Top {top_n_rent} Más Rentables (%)", top_n_rent,
+                key="rent_clientes_mas_porcentaje", ascending=False
+            )
+        with c2:
+            chart_bar(
+                clientes_menos_rentables, "__CLIENTE__", "Rentabilidad",
+                f"Top {top_n_rent} Menor Rentabilidad (%)", top_n_rent,
+                key="rent_clientes_menor_porcentaje", ascending=True
+            )
+
+        c3, c4 = st.columns(2)
+        with c3:
+            chart_bar(
+                clientes_mayor_margen, "__CLIENTE__", "Margen",
+                "Top 20 Mayor Margen ($ COP)", 20,
+                key="rent_clientes_mayor_margen", ascending=False
+            )
+        with c4:
+            chart_bar(
+                clientes_mayor_facturacion, "__CLIENTE__", "Facturación",
+                "Top 20 Mayor Facturación ($ COP)", 20,
+                key="rent_clientes_mayor_facturacion", ascending=False
+            )
+
+        st.markdown("### Matriz Gerencial Cliente: Facturación, Margen y Rentabilidad")
+        matriz = rent_cliente.copy()
+        total_fact_matriz = matriz["Facturación"].sum() or 1
+        total_margen_matriz = matriz["Margen"].sum() or 1
+        mediana_fact = matriz["Facturación"].median() if not matriz.empty else 0
+        mediana_rent = matriz["Rentabilidad"].median() if not matriz.empty else 0
+        matriz["Participación Facturación"] = matriz["Facturación"] / total_fact_matriz
+        matriz["Participación Margen"] = matriz["Margen"] / total_margen_matriz
+
+        def clasificar_cliente(row):
+            alta_fact = row["Facturación"] >= mediana_fact
+            alta_rent = row["Rentabilidad"] >= mediana_rent
+            if alta_fact and alta_rent:
+                return "⭐ Estratégico: alta facturación y buena rentabilidad"
+            if alta_fact and not alta_rent:
+                return "⚠️ Alto volumen con rentabilidad baja: revisar tarifas/costos"
+            if not alta_fact and alta_rent:
+                return "📈 Oportunidad: rentable, pero con bajo volumen"
+            return "🔴 Riesgo: bajo volumen y baja rentabilidad"
+
+        matriz["Clasificación Gerencial"] = matriz.apply(clasificar_cliente, axis=1)
+        matriz = matriz.sort_values(["Margen", "Facturación"], ascending=False)
+
+        matriz_show = matriz.rename(columns={
+            "__CLIENTE__": "Cliente",
+            "Participación Facturación": "Part. Facturación",
+            "Participación Margen": "Part. Margen",
+        })[[
+            "Cliente", "Servicios", "Facturación", "Costos", "Margen", "Rentabilidad",
+            "Part. Facturación", "Part. Margen", "Clasificación Gerencial"
+        ]]
+        show_table(matriz_show, "Matriz Gerencial de Rentabilidad por Cliente", height=520)
+
+        st.download_button(
+            "Descargar matriz gerencial de rentabilidad",
+            data=to_excel_bytes(matriz_show),
+            file_name="matriz_gerencial_rentabilidad_clientes.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_matriz_rentabilidad_clientes"
+        )
+
+        st.markdown("### Rentabilidad por vehículo y tipo de vehículo")
+        c5, c6 = st.columns(2)
+        with c5:
+            placa_margin = aggregate(df, ["__PLACA__"]).query("__PLACA__ != 'Sin dato'").sort_values("Margen", ascending=False)
+            chart_bar(placa_margin, "__PLACA__", "Margen", "Top 20 Mayor Margen por Placa", 20, key="rent_placa_mayor_margen", ascending=False)
+        with c6:
+            tipo_rent = aggregate(df, ["__TIPO_VEHICULO__"]).sort_values("Rentabilidad", ascending=False)
+            chart_bar(tipo_rent, "__TIPO_VEHICULO__", "Rentabilidad", "Rentabilidad por Tipo Vehículo", 20, key="rent_tipo_vehiculo", ascending=False)
 
 with tabs[5]:
     resp_col = "__COORDINADOR__" if df["__COORDINADOR__"].nunique() > 1 else "__USUARIO__"
