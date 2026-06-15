@@ -410,10 +410,7 @@ def chart_bar(data: pd.DataFrame, x: str, y: str, title: str, top: int = 20, key
         return
     d = data.sort_values(y, ascending=False).head(top).copy()
     d["__LABEL__"] = d[y].apply(lambda v: value_label(v, y))
-    if key is None:
-        key = unique_plot_key("bar", title, x, y, top)
-    else:
-        key = unique_plot_key("bar", key, title, x, y, top)
+    key = unique_plot_key("bar", key or "auto", title, x, y, top)
     if PLOTLY_OK:
         fig = px.bar(d, x=x, y=y, text="__LABEL__", title=title)
         fig.update_layout(
@@ -651,8 +648,6 @@ except Exception as e:
 with st.sidebar:
     st.markdown("---")
     st.markdown("## 🎛️ Filtros")
-    periodo = st.selectbox("Periodo de análisis", ["Mensual", "Bimestral", "Trimestral", "Semestral", "Anual"], index=0)
-    pcol = period_col(periodo)
 
     df = df_base.copy()
     if st.button("🔄 Limpiar filtros", use_container_width=True):
@@ -660,8 +655,37 @@ with st.sidebar:
             if k.startswith("flt_"):
                 del st.session_state[k]
         st.rerun()
-    df, _ = apply_filter(df, "Año", "__ANIO__", "flt_anio")
-    df, _ = apply_filter(df, "Mes", "__MES__", "flt_mes")
+
+    # Primero se filtra por año; luego se muestran únicamente los meses disponibles
+    # para ese año. Esto hace que el filtro de mes sí afecte todos los demás filtros,
+    # KPIs, tablas y gráficos.
+    df, anios_sel = apply_filter(df, "Año", "__ANIO__", "flt_anio")
+
+    meses_disponibles = [m for m in MESES_ORDEN if m in df["__MES__"].dropna().astype(str).unique().tolist()]
+    if not meses_disponibles:
+        meses_disponibles = ["Sin fecha"]
+    mes_actual = st.session_state.get("flt_mes_revisar", "Todos")
+    if mes_actual not in ["Todos"] + meses_disponibles:
+        mes_actual = "Todos"
+    mes_revisar = st.selectbox(
+        "Mes a revisar",
+        ["Todos"] + meses_disponibles,
+        index=(["Todos"] + meses_disponibles).index(mes_actual),
+        key="flt_mes_revisar",
+        help="Selecciona el mes exacto que quieres presentar. Este filtro afecta todo el informe."
+    )
+    if mes_revisar != "Todos":
+        df = df[df["__MES__"].astype(str).eq(mes_revisar)].copy()
+
+    periodo = st.selectbox(
+        "Periodo de análisis",
+        ["Mensual", "Bimestral", "Trimestral", "Semestral", "Anual"],
+        index=0,
+        key="flt_periodo_analisis",
+        help="Define cómo se agrupan las tendencias y mapas de calor."
+    )
+    pcol = period_col(periodo)
+
     df, _ = apply_filter(df, "Cliente", "__CLIENTE__", "flt_cliente")
     df, _ = apply_filter(df, "Coordinador", "__COORDINADOR__", "flt_coordinador")
     df, _ = apply_filter(df, "Usuario / Creado Por", "__USUARIO__", "flt_usuario")
@@ -681,6 +705,20 @@ with st.sidebar:
 if df.empty:
     st.warning("No hay registros con los filtros seleccionados.")
     st.stop()
+
+# Contexto visible del filtro principal para presentación gerencial
+mes_visible = st.session_state.get("flt_mes_revisar", "Todos")
+periodo_visible = st.session_state.get("flt_periodo_analisis", "Mensual")
+st.markdown(
+    f"""
+    <div class='section-card' style='padding:12px 16px; margin-top:8px;'>
+        <b>📅 Mes a revisar:</b> {mes_visible} &nbsp;&nbsp; | &nbsp;&nbsp;
+        <b>📊 Agrupación:</b> {periodo_visible} &nbsp;&nbsp; | &nbsp;&nbsp;
+        <b>Registros filtrados:</b> {len(df):,}
+    </div>
+    """.replace(",", "."),
+    unsafe_allow_html=True,
+)
 
 # KPIs principales
 fact = df["__V_CLIENTE__"].sum()
@@ -888,4 +926,3 @@ with tabs[8]:
 st.markdown("---")
 st.download_button("⬇️ Descargar base filtrada en Excel", to_excel_bytes(df), "base_filtrada_informe_gerencial.xlsx")
 st.caption("Informe Gerencial Ejecutivo | Streamlit Cloud | Base cargada dinámicamente por el usuario")
-
