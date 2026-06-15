@@ -18,6 +18,8 @@ from __future__ import annotations
 import io
 import re
 import hashlib
+import itertools
+import uuid
 import unicodedata
 from typing import Dict, List, Optional, Tuple
 
@@ -56,18 +58,25 @@ st.markdown(
     """
     <style>
     .block-container {padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1500px;}
+    html, body, [class*="css"] {color:#0B1220 !important;}
+    [data-testid="stAppViewContainer"] {background:#F6F8FB;}
     [data-testid="stSidebar"] {background: linear-gradient(180deg,#08324C 0%,#0B4F78 100%);} 
-    [data-testid="stSidebar"] * {color: white;}
-    h1, h2, h3 {color:#162033; font-weight: 900;}
-    .main-title {font-size: 2.35rem; font-weight: 900; color:#162033; line-height:1.12; margin-bottom:.2rem;}
-    .subtitle {font-size: 1.02rem; color:#475569; margin-bottom:1.2rem;}
+    [data-testid="stSidebar"] * {color: white !important; font-weight:700;}
+    h1, h2, h3 {color:#0B1220 !important; font-weight: 900;}
+    p, span, label, div {color:#0B1220;}
+    .main-title {font-size: 2.35rem; font-weight: 900; color:#0B1220; line-height:1.12; margin-bottom:.2rem;}
+    .subtitle {font-size: 1.05rem; color:#1F2937; margin-bottom:1.2rem; font-weight:600;}
     .metric-card {
         background:#FFFFFF; border:1px solid #E5E7EB; border-radius:18px; padding:16px 18px;
         box-shadow:0 6px 18px rgba(15,23,42,.08); min-height:112px; border-left:6px solid #0B4F78;
     }
-    .metric-title {font-size:.78rem; color:#64748B; font-weight:800; text-transform:uppercase; letter-spacing:.02rem;}
-    .metric-value {font-size:1.35rem; color:#0F172A; font-weight:900; margin-top:6px; overflow-wrap:anywhere;}
-    .metric-note {font-size:.78rem; color:#64748B; margin-top:6px; font-weight:700;}
+    .metric-title {font-size:.82rem; color:#111827 !important; font-weight:900; text-transform:uppercase; letter-spacing:.02rem;}
+    .metric-value {font-size:1.45rem; color:#000000 !important; font-weight:950; margin-top:6px; overflow-wrap:anywhere;}
+    .metric-note {font-size:.82rem; color:#1F2937 !important; margin-top:6px; font-weight:800;}
+    [data-testid="stMetricValue"] {color:#000000 !important; font-weight:900 !important;}
+    [data-testid="stMetricLabel"] {color:#111827 !important; font-weight:800 !important;}
+    [data-testid="stMetricDelta"] {font-weight:900 !important;}
+    .stDataFrame, .stTable {color:#000000 !important;}
     .card {background:#FFFFFF; border:1px solid #E5E7EB; border-radius:18px; padding:18px; box-shadow:0 6px 18px rgba(15,23,42,.06); margin-bottom:16px;}
     .alert-red {background:#FEE2E2; color:#7F1D1D; padding:11px 14px; border-radius:12px; margin:8px 0; font-weight:800;}
     .alert-yellow {background:#FEF3C7; color:#78350F; padding:11px 14px; border-radius:12px; margin:8px 0; font-weight:800;}
@@ -78,6 +87,40 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+# =========================
+# TEMA VISUAL OSCURO PARA GRÁFICOS
+# =========================
+PLOTLY_LAYOUT = dict(
+    font=dict(family="Arial, sans-serif", size=14, color="#000000"),
+    title_font=dict(family="Arial, sans-serif", size=20, color="#000000"),
+    xaxis=dict(
+        tickfont=dict(size=13, color="#000000"),
+        title_font=dict(size=14, color="#000000"),
+        showgrid=True,
+        gridcolor="#D1D5DB",
+        linecolor="#111827",
+        zerolinecolor="#9CA3AF",
+    ),
+    yaxis=dict(
+        tickfont=dict(size=13, color="#000000"),
+        title_font=dict(size=14, color="#000000"),
+        showgrid=True,
+        gridcolor="#D1D5DB",
+        linecolor="#111827",
+        zerolinecolor="#9CA3AF",
+    ),
+    legend=dict(font=dict(size=13, color="#000000")),
+)
+
+def apply_dark_plotly_theme(fig):
+    """Aplica letras y números oscuros a cualquier gráfico Plotly."""
+    if fig is None:
+        return fig
+    fig.update_layout(**PLOTLY_LAYOUT)
+    fig.update_coloraxes(colorbar=dict(tickfont=dict(color="#000000", size=12), title_font=dict(color="#000000", size=13)))
+    return fig
 
 MESES = {1:"Ene", 2:"Feb", 3:"Mar", 4:"Abr", 5:"May", 6:"Jun", 7:"Jul", 8:"Ago", 9:"Sep", 10:"Oct", 11:"Nov", 12:"Dic", 0:"Sin fecha"}
 MESES_ORDEN = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic", "Sin fecha"]
@@ -191,6 +234,17 @@ def safe_key(*parts: object) -> str:
     raw = re.sub(r"[^A-Za-z0-9_]+", "_", raw)[:80]
     digest = hashlib.md5("|".join(str(p) for p in parts).encode("utf-8")).hexdigest()[:8]
     return f"{raw}_{digest}"
+
+
+
+_PLOT_COUNTER = itertools.count(1)
+
+def unique_plot_key(*parts: object) -> str:
+    """Genera keys realmente únicos para evitar StreamlitDuplicateElementKey/Id.
+    Streamlit puede repetir IDs si dos gráficos tienen la misma estructura; por eso
+    agregamos contador y un sufijo corto uuid en cada renderizado.
+    """
+    return safe_key(*parts, next(_PLOT_COUNTER), uuid.uuid4().hex[:8])
 
 
 def value_label(value: float, metric: str) -> str:
@@ -357,7 +411,9 @@ def chart_bar(data: pd.DataFrame, x: str, y: str, title: str, top: int = 20, key
     d = data.sort_values(y, ascending=False).head(top).copy()
     d["__LABEL__"] = d[y].apply(lambda v: value_label(v, y))
     if key is None:
-        key = safe_key("bar", title, x, y, top)
+        key = unique_plot_key("bar", title, x, y, top)
+    else:
+        key = unique_plot_key("bar", key, title, x, y, top)
     if PLOTLY_OK:
         fig = px.bar(d, x=x, y=y, text="__LABEL__", title=title)
         fig.update_layout(
@@ -365,6 +421,7 @@ def chart_bar(data: pd.DataFrame, x: str, y: str, title: str, top: int = 20, key
             yaxis=dict(title=y, tickprefix="$ " if y in ["Facturación", "Costos", "Margen"] else "", tickformat=",.0f" if y in ["Facturación", "Costos", "Margen", "Servicios"] else ".0%" if y == "Rentabilidad" else None),
         )
         fig.update_traces(marker_color="#0B4F78", textposition="outside", cliponaxis=False, hovertemplate=f"%{{x}}<br>{y}: %{{text}}<extra></extra>")
+        fig = apply_dark_plotly_theme(fig)
         st.plotly_chart(fig, use_container_width=True, key=key)
     else:
         st.subheader(title)
@@ -380,7 +437,8 @@ def chart_line(data: pd.DataFrame, x: str, y: str, title: str, color: Optional[s
     if PLOTLY_OK:
         fig = px.line(d, x=x, y=y, color=color, markers=True, title=title)
         fig.update_layout(height=430, plot_bgcolor="white", paper_bgcolor="white", title_font_size=18)
-        st.plotly_chart(fig, use_container_width=True, key=safe_key("line", title, x, y, color or ""))
+        fig = apply_dark_plotly_theme(fig)
+        st.plotly_chart(fig, use_container_width=True, key=unique_plot_key("line", title, x, y, color or ""))
     else:
         st.subheader(title)
         if color and color in d.columns:
@@ -408,7 +466,8 @@ def chart_heatmap(data: pd.DataFrame, index: str, columns: str, values: str, tit
             title=title,
         )
         fig.update_layout(height=max(420, min(900, 90 + 26 * len(pivot))), title_font_size=18)
-        st.plotly_chart(fig, use_container_width=True, key=safe_key("heatmap", title, index, columns, values))
+        fig = apply_dark_plotly_theme(fig)
+        st.plotly_chart(fig, use_container_width=True, key=unique_plot_key("heatmap", title, index, columns, values))
     else:
         st.subheader(title)
         st.dataframe(pivot.style.background_gradient(cmap="RdYlGn", axis=None), use_container_width=True, height=520)
@@ -497,6 +556,7 @@ def chart_financial_combo(fin: pd.DataFrame, pcol: str, title: str, key: str) ->
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             margin=dict(t=80, b=40, l=40, r=40),
         )
+        fig = apply_dark_plotly_theme(fig)
         st.plotly_chart(fig, use_container_width=True, key=key)
     else:
         st.subheader(title)
@@ -722,7 +782,8 @@ with tabs[3]:
         fig_var = px.bar(fin, x=pcol, y="Var Facturación %", text="Variación Facturación", title="Subidas y Bajadas de Facturación vs Periodo Anterior")
         fig_var.update_layout(height=390, plot_bgcolor="white", paper_bgcolor="white", yaxis=dict(title="Variación %", tickformat=".1%"))
         fig_var.update_traces(marker_color=np.where(fin["Var Facturación %"] >= 0, "#16A34A", "#DC2626"), textposition="outside", hovertemplate="Periodo: %{x}<br>Variación: %{text}<extra></extra>")
-        st.plotly_chart(fig_var, use_container_width=True, key=safe_key("var_facturacion", periodo, len(df)))
+        fig_var = apply_dark_plotly_theme(fig_var)
+        st.plotly_chart(fig_var, use_container_width=True, key=unique_plot_key("var_facturacion", periodo, len(df)))
     elif not fin.empty:
         st.bar_chart(fin.set_index(pcol)["Var Facturación %"])
     show_table(fin.rename(columns={pcol: "Periodo"}), "Tabla Financiera por Periodo")
@@ -784,7 +845,8 @@ with tabs[7]:
         map_agg = mdf.groupby(["__ORIGEN__", "lat", "lon"], as_index=False).agg(Servicios=("__SERVICIOS__", "sum"), Facturación=("__V_CLIENTE__", "sum"))
         fig = px.scatter_mapbox(map_agg, lat="lat", lon="lon", size="Servicios", color="Facturación", hover_name="__ORIGEN__", zoom=4, mapbox_style="carto-positron", title="Mapa Estratégico por Origen")
         fig.update_layout(height=620)
-        st.plotly_chart(fig, use_container_width=True, key=safe_key("mapa_estrategico", len(mdf)))
+        fig = apply_dark_plotly_theme(fig)
+        st.plotly_chart(fig, use_container_width=True, key=unique_plot_key("mapa_estrategico", len(mdf)))
     elif not mdf.empty:
         st.map(mdf[["lat", "lon"]])
     else:
@@ -826,3 +888,4 @@ with tabs[8]:
 st.markdown("---")
 st.download_button("⬇️ Descargar base filtrada en Excel", to_excel_bytes(df), "base_filtrada_informe_gerencial.xlsx")
 st.caption("Informe Gerencial Ejecutivo | Streamlit Cloud | Base cargada dinámicamente por el usuario")
+
