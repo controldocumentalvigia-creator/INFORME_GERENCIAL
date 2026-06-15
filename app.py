@@ -232,22 +232,35 @@ def numeric_ratio(series: pd.Series) -> float:
 def resolve_conductor_column(df: pd.DataFrame, current: Optional[str]) -> Optional[str]:
     """Identifica la columna real del conductor sin confundirla con costos.
 
-    Problema corregido: algunas bases traen `VALOR CONDUCTOR` o `V.CONDUCT`;
-    por coincidencia parcial, eso podía quedar como `CONDUCTOR`, generando ejes
-    numéricos como 0.2, 0.4, 1B en el gráfico.
+    REGLA DE NEGOCIO DEL ARCHIVO TRAYECTOS TODOS:
+    La base puede traer varias columnas con nombres parecidos a CONDUCTO/CONDUCTOR.
+    Para este informe se debe tomar como nombre real del conductor la columna W
+    del Excel, que equivale a la posición 22 en pandas.
+
+    Esta prioridad evita que el dashboard use por error V.CONDUCT, VALOR CONDUCTOR
+    o cualquier columna monetaria como nombre del conductor.
     """
-    # 1) Coincidencia exacta fuerte por nombre normalizado.
+    # 1) Prioridad absoluta: columna W del Excel = índice 22 en pandas.
+    if len(df.columns) > 22:
+        col_w = df.columns[22]
+        if col_w in df.columns and not is_bad_conductor_column_name(col_w):
+            # Si la columna W no es principalmente numérica, se asume como nombre.
+            if numeric_ratio(df[col_w]) < 0.80:
+                return col_w
+
+    # 2) Coincidencia exacta fuerte por nombre normalizado.
     norm_map = {normalize_col(c): c for c in df.columns}
     for name in STRICT_CONDUCTOR_NAMES:
         if name in norm_map and not is_bad_conductor_column_name(norm_map[name]):
-            return norm_map[name]
+            if numeric_ratio(df[norm_map[name]]) < 0.80:
+                return norm_map[name]
 
-    # 2) Si el actual no parece financiero ni numérico, se acepta.
+    # 3) Si el actual no parece financiero ni numérico, se acepta.
     if current and current in df.columns:
         if not is_bad_conductor_column_name(current) and numeric_ratio(df[current]) < 0.80:
             return current
 
-    # 3) Búsqueda flexible: columnas que mencionen conductor, excluyendo valores/costos.
+    # 4) Búsqueda flexible: columnas que mencionen conductor, excluyendo valores/costos.
     candidates = []
     for c in df.columns:
         n = normalize_col(c)
@@ -1171,4 +1184,3 @@ with tabs[8]:
 st.markdown("---")
 st.download_button("⬇️ Descargar base filtrada en Excel", to_excel_bytes(df), "base_filtrada_informe_gerencial.xlsx")
 st.caption("Informe Gerencial Ejecutivo | Streamlit Cloud | Base cargada dinámicamente por el usuario")
-
