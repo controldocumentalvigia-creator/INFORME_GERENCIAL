@@ -693,7 +693,7 @@ def show_table(df: pd.DataFrame, title: str, height: int = 420) -> None:
     for col in show.columns:
         if col in ["Facturación", "Costos", "Margen", "Variación $", "Valor Actual", "Valor Anterior"]:
             show[col] = show[col].apply(fmt_cop)
-        elif col in ["Rentabilidad", "Participación", "Variación %", "Crecimiento", "Var Facturación %", "Var Margen %", "Var Servicios %"]:
+        elif col in ["Rentabilidad", "Participación", "Variación %", "Crecimiento", "Var Facturación %", "Var Margen %", "Var Servicios %", "OTIF Cierre", "% Cerrado", "% Pendiente"]:
             show[col] = show[col].apply(fmt_pct)
     if AGGRID_OK:
         gb = GridOptionsBuilder.from_dataframe(show)
@@ -801,6 +801,144 @@ def chart_financial_combo(fin: pd.DataFrame, pcol: str, title: str, key: str) ->
         st.subheader(title)
         st.line_chart(fin.set_index(pcol)[["Facturación", "Margen"]])
 
+
+
+
+def is_cierre_total_estado(value: object) -> bool:
+    """Regla oficial de cierre mensual.
+
+    ESTADO OP = CUMPLIDO OPERATIVO significa que la remesa/servicio quedó cerrado
+    totalmente a corte de fin de mes. ANULADO ya fue excluido en prepare_data.
+    """
+    return normalize_text(value) == "CUMPLIDO OPERATIVO"
+
+
+def closure_summary(df_base: pd.DataFrame) -> Dict[str, float]:
+    """KPIs de cierre operativo/OTIF.
+
+    Denominador: total de servicios no anulados dentro del filtro.
+    Numerador: servicios con ESTADO OP = CUMPLIDO OPERATIVO.
+    Pendiente: todo estado diferente de CUMPLIDO OPERATIVO.
+    """
+    total = int(len(df_base))
+    cerrados = int(df_base["__ESTADO_OP__"].apply(is_cierre_total_estado).sum()) if "__ESTADO_OP__" in df_base.columns else 0
+    pendientes = max(total - cerrados, 0)
+    otif = cerrados / total if total else 0.0
+    corte = df_base["__FECHA__"].max() if "__FECHA__" in df_base.columns and not df_base["__FECHA__"].isna().all() else pd.NaT
+    return {"total": total, "cerrados": cerrados, "pendientes": pendientes, "otif": otif, "corte": corte}
+
+
+def closure_person_table(df_base: pd.DataFrame, person_col: str = "__USUARIO__") -> pd.DataFrame:
+    """Tabla tipo Excel: Quien creó x Estado OP + Total + OTIF."""
+    if df_base.empty or person_col not in df_base.columns or "__ESTADO_OP__" not in df_base.columns:
+        return pd.DataFrame()
+    d = df_base.copy()
+    d[person_col] = d[person_col].fillna("Sin dato").astype(str).replace("", "Sin dato")
+    d["__ESTADO_OP__"] = d["__ESTADO_OP__"].fillna("Sin dato").astype(str).replace("", "Sin dato")
+    pivot = pd.crosstab(d[person_col], d["__ESTADO_OP__"])
+    pivot["Total general"] = pivot.sum(axis=1)
+    pivot["Cerradas"] = d.groupby(person_col)["__ESTADO_OP__"].apply(lambda s: s.apply(is_cierre_total_estado).sum())
+    pivot["Pendientes cierre"] = pivot["Total general"] - pivot["Cerradas"]
+    pivot["OTIF Cierre"] = np.where(pivot["Total general"].ne(0), pivot["Cerradas"] / pivot["Total general"], 0)
+    pivot = pivot.reset_index().rename(columns={person_col: "Quien creó"})
+    estado_cols = [c for c in pivot.columns if c not in ["Quien creó", "Total general", "Cerradas", "Pendientes cierre", "OTIF Cierre"]]
+    ordered = ["Quien creó"] + sorted(estado_cols) + ["Total general", "Cerradas", "Pendientes cierre", "OTIF Cierre"]
+    return pivot[ordered].sort_values(["OTIF Cierre", "Total general"], ascending=[False, False])
+
+def closure_matrix_by_dimension(df_base: pd.DataFrame, dim_col: str, dim_label: str) -> pd.DataFrame:
+    """Matriz tipo tabla dinámica: dimensión vs ESTADO OP + métricas de cierre.
+
+    Regla de negocio:
+    - Denominador: servicios válidos del filtro actual, sin ANULADO.
+    - Numerador: ESTADO OP = CUMPLIDO OPERATIVO.
+    - Pendiente: todo estado diferente de CUMPLIDO OPERATIVO.
+    """
+    if df_base.empty or dim_col not in df_base.columns or "__ESTADO_OP__" not in df_base.columns:
+        return pd.DataFrame()
+    d = df_base.copy()
+    d[dim_col] = d[dim_col].fillna("Sin dato").astype(str).replace("", "Sin dato")
+    d["__ESTADO_OP__"] = d["__ESTADO_OP__"].fillna("Sin dato").astype(str).replace("", "Sin dato")
+
+    pivot = pd.crosstab(d[dim_col], d["__ESTADO_OP__"])
+    pivot["Total general"] = pivot.sum(axis=1)
+    pivot["Cerradas"] = d.groupby(dim_col)["__ESTADO_OP__"].apply(lambda s: s.apply(is_cierre_total_estado).sum())
+    pivot["Pendientes cierre"] = pivot["Total general"] - pivot["Cerradas"]
+    pivot["OTIF Cierre"] = np.where(pivot["Total general"].ne(0), pivot["Cerradas"] / pivot["Total general"], 0)
+    pivot["% Pendiente"] = np.where(pivot["Total general"].ne(0), pivot["Pendientes cierre"] / pivot["Total general"], 0)
+
+    pivot = pivot.reset_index().rename(columns={dim_col: dim_label})
+    estado_cols = [c for c in pivot.columns if c not in [dim_label, "Total general", "Cerradas", "Pendientes cierre", "OTIF Cierre", "% Pendiente"]]
+    ordered = [dim_label] + sorted(estado_cols) + ["Total general", "Cerradas", "Pendientes cierre", "OTIF Cierre", "% Pendiente"]
+    return pivot[ordered].sort_values(["Pendientes cierre", "Total general"], ascending=[False, False])
+
+
+def closure_matrix_client_person(df_base: pd.DataFrame, person_col: str = "__USUARIO__") -> pd.DataFrame:
+    """Matriz cliente + responsable vs ESTADO OP para identificar pendientes por cuenta y persona."""
+    if df_base.empty or "__CLIENTE__" not in df_base.columns or person_col not in df_base.columns or "__ESTADO_OP__" not in df_base.columns:
+        return pd.DataFrame()
+    d = df_base.copy()
+    d["Cliente"] = d["__CLIENTE__"].fillna("Sin dato").astype(str).replace("", "Sin dato")
+    d["Quien creó"] = d[person_col].fillna("Sin dato").astype(str).replace("", "Sin dato")
+    d["Estado OP"] = d["__ESTADO_OP__"].fillna("Sin dato").astype(str).replace("", "Sin dato")
+
+    pivot = pd.crosstab([d["Cliente"], d["Quien creó"]], d["Estado OP"])
+    pivot["Total general"] = pivot.sum(axis=1)
+    cierre_group = d.groupby(["Cliente", "Quien creó"])["Estado OP"].apply(lambda s: s.apply(is_cierre_total_estado).sum())
+    pivot["Cerradas"] = cierre_group
+    pivot["Pendientes cierre"] = pivot["Total general"] - pivot["Cerradas"]
+    pivot["OTIF Cierre"] = np.where(pivot["Total general"].ne(0), pivot["Cerradas"] / pivot["Total general"], 0)
+    pivot["% Pendiente"] = np.where(pivot["Total general"].ne(0), pivot["Pendientes cierre"] / pivot["Total general"], 0)
+    pivot = pivot.reset_index()
+    estado_cols = [c for c in pivot.columns if c not in ["Cliente", "Quien creó", "Total general", "Cerradas", "Pendientes cierre", "OTIF Cierre", "% Pendiente"]]
+    ordered = ["Cliente", "Quien creó"] + sorted(estado_cols) + ["Total general", "Cerradas", "Pendientes cierre", "OTIF Cierre", "% Pendiente"]
+    return pivot[ordered].sort_values(["Pendientes cierre", "Total general"], ascending=[False, False])
+
+
+def add_total_row_closure(tbl: pd.DataFrame, label_col: str) -> pd.DataFrame:
+    """Agrega fila Total general a matrices de cierre."""
+    if tbl.empty or label_col not in tbl.columns:
+        return tbl
+    total_row = {col: 0 for col in tbl.columns}
+    total_row[label_col] = "Total general"
+    for col in tbl.columns:
+        if col == label_col or col in ["OTIF Cierre", "% Pendiente"]:
+            continue
+        total_row[col] = pd.to_numeric(tbl[col], errors="coerce").fillna(0).sum()
+    total = total_row.get("Total general", 0)
+    cerradas = total_row.get("Cerradas", 0)
+    pendientes = total_row.get("Pendientes cierre", 0)
+    total_row["OTIF Cierre"] = cerradas / total if total else 0
+    total_row["% Pendiente"] = pendientes / total if total else 0
+    return pd.concat([tbl, pd.DataFrame([total_row])], ignore_index=True)
+
+
+def closure_by_period(df_base: pd.DataFrame, pcol: str) -> pd.DataFrame:
+    if df_base.empty or pcol not in df_base.columns:
+        return pd.DataFrame()
+    d = df_base.copy()
+    d["__CERRADO__"] = d["__ESTADO_OP__"].apply(is_cierre_total_estado).astype(int)
+    g = d.groupby(pcol, as_index=False).agg(
+        Servicios=("__SERVICIOS__", "sum"),
+        Cerradas=("__CERRADO__", "sum"),
+    )
+    g["Pendientes cierre"] = g["Servicios"] - g["Cerradas"]
+    g["OTIF Cierre"] = np.where(g["Servicios"].ne(0), g["Cerradas"] / g["Servicios"], 0)
+    g["__ORD__"] = g[pcol].apply(lambda v: ordered_periods([v])[0] if str(v) != "Sin fecha" else "9999")
+    return g.sort_values(pcol).drop(columns=["__ORD__"], errors="ignore")
+
+
+def closure_status_matrix(df_base: pd.DataFrame, person_col: str = "__USUARIO__") -> pd.DataFrame:
+    """Matriz pura para vista similar a tabla dinámica de Excel."""
+    tbl = closure_person_table(df_base, person_col)
+    if tbl.empty:
+        return tbl
+    total_row = {col: 0 for col in tbl.columns}
+    total_row["Quien creó"] = "Total general"
+    numeric_cols = [c for c in tbl.columns if c not in ["Quien creó", "OTIF Cierre"]]
+    for c in numeric_cols:
+        total_row[c] = pd.to_numeric(tbl[c], errors="coerce").fillna(0).sum()
+    total_row["OTIF Cierre"] = total_row.get("Cerradas", 0) / total_row.get("Total general", 1) if total_row.get("Total general", 0) else 0
+    return pd.concat([tbl, pd.DataFrame([total_row])], ignore_index=True)
 
 def executive_summary(df: pd.DataFrame, pcol: str) -> str:
     fact = df["__V_CLIENTE__"].sum()
@@ -1013,6 +1151,7 @@ tabs = st.tabs([
     "7. Flota y Conductores",
     "8. Mapa Estratégico",
     "9. Alertas Ejecutivas",
+    "10. Cierre / OTIF",
 ])
 
 with tabs[0]:
@@ -1261,6 +1400,147 @@ with tabs[8]:
     if not var_tbl.empty:
         show_table(var_tbl.rename(columns={"__CLIENTE__": "Cliente"}), "Análisis de Variaciones por Cliente")
     show_table(rent_tbl.rename(columns={"__CLIENTE__": "Cliente"}), "Concentración y Rentabilidad por Cliente")
+
+
+
+with tabs[9]:
+    st.markdown("### Seguimiento operativo de personal y cierre mensual")
+    st.markdown(
+        """
+        <div class='info-box'>
+        Regla de negocio: <b>OTIF / % de cierre</b> = servicios con <b>ESTADO OP = CUMPLIDO OPERATIVO</b> / total de servicios no anulados. 
+        Los estados CUMPLIDO, EN PROGRAMACIÓN, EN TRÁNSITO y demás estados diferentes de CUMPLIDO OPERATIVO quedan como pendientes de cierre.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    cierre = closure_summary(df)
+    corte_txt = "Sin fecha"
+    if pd.notna(cierre.get("corte")):
+        corte_txt = pd.to_datetime(cierre["corte"]).strftime("%d/%m/%Y")
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        make_kpi("OTIF Cierre", fmt_pct(cierre["otif"]), f"Corte: {corte_txt}")
+    with k2:
+        make_kpi("Servicios a cerrar", fmt_num(cierre["total"]), "Total sin anulados")
+    with k3:
+        make_kpi("Remesas cerradas", fmt_num(cierre["cerrados"]), "Estado: Cumplido Operativo")
+    with k4:
+        make_kpi("Pendientes de cierre", fmt_num(cierre["pendientes"]), "No están en Cumplido Operativo")
+
+    person_col = "__USUARIO__"
+    person_label = "Quien creó"
+    if df["__USUARIO__"].nunique() <= 1 and df["__COORDINADOR__"].nunique() > 1:
+        person_col = "__COORDINADOR__"
+        person_label = "Coordinador"
+
+    st.markdown(f"### Tabla dinámica de cierre por {person_label}")
+    cierre_personal = closure_status_matrix(df, person_col)
+    if not cierre_personal.empty:
+        show_table(cierre_personal, f"Seguimiento operativo: {person_label} vs Estado OP", height=520)
+        st.download_button(
+            "Descargar seguimiento de cierre por personal",
+            data=to_excel_bytes(cierre_personal),
+            file_name="seguimiento_cierre_por_personal.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_seguimiento_cierre_personal"
+        )
+    else:
+        st.info("No hay datos suficientes para construir el seguimiento por personal.")
+
+    st.markdown("### Seguimiento de cierre por cliente")
+    st.markdown(
+        """
+        <div class='info-box'>
+        Esta matriz permite ver <b>Cliente vs Estado OP</b>. Ayuda a identificar qué cliente tiene más remesas pendientes de cierre y cuál está afectando el cierre mensual.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    cierre_cliente = closure_matrix_by_dimension(df, "__CLIENTE__", "Cliente")
+    if not cierre_cliente.empty:
+        cierre_cliente_total = add_total_row_closure(cierre_cliente, "Cliente")
+        show_table(cierre_cliente_total, "Cliente vs Estado OP - Seguimiento de cierre", height=560)
+        st.download_button(
+            "Descargar Cliente vs Estado OP",
+            data=to_excel_bytes(cierre_cliente_total),
+            file_name="cliente_vs_estado_op_cierre.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_cliente_estado_op_cierre"
+        )
+
+        ccli1, ccli2 = st.columns(2)
+        with ccli1:
+            chart_bar(
+                cierre_cliente.sort_values("Pendientes cierre", ascending=False),
+                "Cliente", "Pendientes cierre", "Clientes con más pendientes de cierre", 20,
+                key="clientes_mas_pendientes_cierre", ascending=False
+            )
+        with ccli2:
+            chart_bar(
+                cierre_cliente.sort_values("OTIF Cierre", ascending=False),
+                "Cliente", "OTIF Cierre", "% Cierre por Cliente", 20,
+                key="otif_cierre_cliente", ascending=False
+            )
+    else:
+        st.info("No hay datos suficientes para construir Cliente vs Estado OP.")
+
+    st.markdown("### Cliente + Quien creó vs Estado OP")
+    cierre_cliente_persona = closure_matrix_client_person(df, person_col)
+    if not cierre_cliente_persona.empty:
+        show_table(cierre_cliente_persona, "Cliente + Quien creó vs Estado OP", height=560)
+        st.download_button(
+            "Descargar Cliente + Quien creó vs Estado OP",
+            data=to_excel_bytes(cierre_cliente_persona),
+            file_name="cliente_quien_creo_vs_estado_op.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_cliente_persona_estado_op"
+        )
+    else:
+        st.info("No hay datos suficientes para construir Cliente + Quien creó vs Estado OP.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        ranking_cierre = closure_person_table(df, person_col)
+        if not ranking_cierre.empty:
+            chart_bar(
+                ranking_cierre[ranking_cierre[person_label if person_label in ranking_cierre.columns else "Quien creó"] != "Total general"] if person_label in ranking_cierre.columns else ranking_cierre,
+                "Quien creó", "OTIF Cierre", "Ranking % Cierre por Quien Creó", 20,
+                key="otif_ranking_personal", ascending=False
+            )
+    with c2:
+        pendientes_personal = closure_person_table(df, person_col)
+        if not pendientes_personal.empty:
+            chart_bar(
+                pendientes_personal.sort_values("Pendientes cierre", ascending=False),
+                "Quien creó", "Pendientes cierre", "Pendientes de Cierre por Quien Creó", 20,
+                key="otif_pendientes_personal", ascending=False
+            )
+
+    st.markdown("### Evolución del cierre por periodo")
+    cierre_periodo = closure_by_period(df_compare if not df_compare.empty else df, pcol)
+    if not cierre_periodo.empty:
+        c3, c4 = st.columns(2)
+        with c3:
+            chart_bar(cierre_periodo, pcol, "OTIF Cierre", f"% Cierre - {periodo}", 20, key="otif_periodo", ascending=False)
+        with c4:
+            cierre_stack = cierre_periodo.rename(columns={pcol: "Periodo"})
+            show_table(cierre_stack, "Detalle cierre por periodo", height=360)
+    else:
+        st.info("No hay suficientes periodos para mostrar evolución de cierre.")
+
+    st.markdown("### Recomendación de uso para remuneración mensual")
+    st.markdown(
+        """
+        <div class='warn-box'>
+        Para remuneración, usa como indicador principal <b>OTIF Cierre</b> por <b>Quien creó</b>, con una regla mínima de volumen. 
+        Ejemplo gerencial: pagar incentivo si el responsable tiene mínimo 50 servicios en el mes y alcanza 95% o más de cierre a corte de fin de mes.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 st.markdown("---")
 st.download_button("⬇️ Descargar base filtrada en Excel", to_excel_bytes(df), "base_filtrada_informe_gerencial.xlsx")
