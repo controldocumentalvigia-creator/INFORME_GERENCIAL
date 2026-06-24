@@ -693,7 +693,7 @@ def show_table(df: pd.DataFrame, title: str, height: int = 420) -> None:
     for col in show.columns:
         if col in ["Facturación", "Costos", "Margen", "Variación $", "Valor Actual", "Valor Anterior"]:
             show[col] = show[col].apply(fmt_cop)
-        elif col in ["Rentabilidad", "Participación", "Variación %", "Crecimiento", "Var Facturación %", "Var Margen %", "Var Servicios %", "ICO Cierre", "% Cerrado", "% Pendiente", "OTIF Operativo"]:
+        elif (col in ["Rentabilidad", "Participación", "Variación %", "Crecimiento", "Var Facturación %", "Var Margen %", "Var Servicios %", "ICO Cierre", "ICO Cierre Operativo", "% Cerrado", "% Pendiente", "% Pendiente ICO", "OTIF Operativo", "Avance Legalización", "% Legalización"] or "%" in str(col) or "ICO" in str(col) or "OTIF" in str(col) or "Legalización" in str(col)):
             show[col] = show[col].apply(fmt_pct)
     if AGGRID_OK:
         gb = GridOptionsBuilder.from_dataframe(show)
@@ -1055,6 +1055,225 @@ def find_city_coords(text: object) -> Optional[Tuple[float, float]]:
     return None
 
 # =========================
+
+# ==============================
+# KPIS DEFINITIVOS: OTIF / ICO / LEGALIZACIÓN
+# ==============================
+def is_cumplido_operativo_estado(value: object) -> bool:
+    return normalize_text(value) == "CUMPLIDO OPERATIVO"
+
+
+def is_cumplido_legalizado_estado(value: object) -> bool:
+    return normalize_text(value) == "CUMPLIDO"
+
+
+def is_servicio_prestado_o_ok(value: object) -> bool:
+    return normalize_text(value) in {"CUMPLIDO OPERATIVO", "CUMPLIDO"}
+
+
+def estado_counts_dict(df_base: pd.DataFrame) -> Dict[str, int]:
+    if df_base.empty or "__ESTADO_OP__" not in df_base.columns:
+        return {}
+    vc = df_base["__ESTADO_OP__"].fillna("Sin dato").astype(str).replace("", "Sin dato").value_counts()
+    return {str(k): int(v) for k, v in vc.items()}
+
+
+def get_estado_count(df_base: pd.DataFrame, estado_norm: str) -> int:
+    if df_base.empty or "__ESTADO_OP__" not in df_base.columns:
+        return 0
+    return int(df_base["__ESTADO_OP__"].apply(lambda x: normalize_text(x) == estado_norm).sum())
+
+
+def operational_kpi_summary(df_base: pd.DataFrame) -> Dict[str, float]:
+    total = int(len(df_base))
+    if total == 0 or "__ESTADO_OP__" not in df_base.columns:
+        return {"total": 0, "otif": 0.0, "cumplidos_otif": 0, "cumplidos": 0, "no_cumplidos": 0, "ico": 0.0, "cerrados": 0, "legalizacion": 0.0, "legalizados": 0, "pendientes_ico": 0, "pendientes_cierre": 0, "pendientes_operativos": 0}
+    estados = df_base["__ESTADO_OP__"]
+    cumplidos_otif = int(estados.apply(is_servicio_prestado_o_ok).sum())
+    cerrados = int(estados.apply(is_cumplido_operativo_estado).sum())
+    legalizados = int(estados.apply(is_cumplido_legalizado_estado).sum())
+    pendientes_ico = max(total - cerrados, 0)
+    pendientes_operativos = int((~estados.apply(lambda x: normalize_text(x) in {"CUMPLIDO OPERATIVO", "CUMPLIDO"})).sum())
+    return {
+        "total": total,
+        "otif": cumplidos_otif / total if total else 0.0,
+        "cumplidos_otif": cumplidos_otif,
+        "cumplidos": cumplidos_otif,
+        "no_cumplidos": max(total - cumplidos_otif, 0),
+        "ico": cerrados / total if total else 0.0,
+        "cerrados": cerrados,
+        "pendientes_cierre": pendientes_ico,
+        "pendientes_ico": pendientes_ico,
+        "legalizacion": legalizados / total if total else 0.0,
+        "legalizados": legalizados,
+        "pendientes_operativos": pendientes_operativos,
+    }
+
+
+def closure_summary(df_base: pd.DataFrame) -> Dict[str, float]:
+    total = int(len(df_base))
+    cerrados = get_estado_count(df_base, "CUMPLIDO OPERATIVO")
+    legalizados = get_estado_count(df_base, "CUMPLIDO")
+    en_transito = get_estado_count(df_base, "EN TRANSITO")
+    en_programacion = get_estado_count(df_base, "EN PROGRAMACION")
+    reprogramado = get_estado_count(df_base, "REPROGRAMADO")
+    pendientes_ico = max(total - cerrados, 0)
+    if "__ESTADO_OP__" in df_base.columns:
+        pendientes_operativos = int((~df_base["__ESTADO_OP__"].apply(lambda x: normalize_text(x) in {"CUMPLIDO OPERATIVO", "CUMPLIDO"})).sum())
+    else:
+        pendientes_operativos = 0
+    corte = df_base["__FECHA__"].max() if "__FECHA__" in df_base.columns and not df_base["__FECHA__"].isna().all() else pd.NaT
+    return {
+        "total": total,
+        "cerrados": cerrados,
+        "pendientes": pendientes_ico,
+        "pendientes_ico": pendientes_ico,
+        "pendientes_operativos": pendientes_operativos,
+        "ico": cerrados / total if total else 0.0,
+        "legalizados": legalizados,
+        "legalizacion": legalizados / total if total else 0.0,
+        "en_transito": en_transito,
+        "en_programacion": en_programacion,
+        "reprogramado": reprogramado,
+        "corte": corte,
+    }
+
+
+def operational_kpi_by_dimension(df_base: pd.DataFrame, dim_col: str, dim_label: str) -> pd.DataFrame:
+    if df_base.empty or dim_col not in df_base.columns or "__ESTADO_OP__" not in df_base.columns:
+        return pd.DataFrame()
+    d = df_base.copy()
+    d[dim_col] = d[dim_col].fillna("Sin dato").astype(str).replace("", "Sin dato")
+    d["__OTIF_OK__"] = d["__ESTADO_OP__"].apply(is_servicio_prestado_o_ok).astype(int)
+    d["__ICO_OK__"] = d["__ESTADO_OP__"].apply(is_cumplido_operativo_estado).astype(int)
+    d["__LEGALIZADO__"] = d["__ESTADO_OP__"].apply(is_cumplido_legalizado_estado).astype(int)
+    d["__PEND_OPERATIVO__"] = (~d["__ESTADO_OP__"].apply(lambda x: normalize_text(x) in {"CUMPLIDO OPERATIVO", "CUMPLIDO"})).astype(int)
+    g = d.groupby(dim_col, as_index=False).agg(
+        Servicios=("__SERVICIOS__", "sum"),
+        Cumplidos_OTIF=("__OTIF_OK__", "sum"),
+        Cerradas=("__ICO_OK__", "sum"),
+        Legalizadas=("__LEGALIZADO__", "sum"),
+        Pendientes_operativos=("__PEND_OPERATIVO__", "sum"),
+        Facturación=("__V_CLIENTE__", "sum"),
+        Costos=("__V_CONDUCT__", "sum"),
+        Margen=("__MARGEN__", "sum"),
+    )
+    g["No cumplidos OTIF"] = g["Servicios"] - g["Cumplidos_OTIF"]
+    g["Pendientes cierre ICO"] = g["Servicios"] - g["Cerradas"]
+    g["OTIF Operativo"] = np.where(g["Servicios"].ne(0), g["Cumplidos_OTIF"] / g["Servicios"], 0)
+    g["ICO Cierre"] = np.where(g["Servicios"].ne(0), g["Cerradas"] / g["Servicios"], 0)
+    g["Avance Legalización"] = np.where(g["Servicios"].ne(0), g["Legalizadas"] / g["Servicios"], 0)
+    g["Rentabilidad"] = np.where(g["Facturación"].ne(0), g["Margen"] / g["Facturación"], 0)
+    g = g.rename(columns={dim_col: dim_label, "Cumplidos_OTIF": "Cumplidos OTIF", "Pendientes_operativos": "Pendientes operativos"})
+    cols = [dim_label, "Servicios", "Cumplidos OTIF", "No cumplidos OTIF", "OTIF Operativo", "Cerradas", "Pendientes cierre ICO", "ICO Cierre", "Legalizadas", "Avance Legalización", "Pendientes operativos", "Facturación", "Costos", "Margen", "Rentabilidad"]
+    return g[cols].sort_values(["Servicios", "ICO Cierre"], ascending=[False, False])
+
+
+def closure_matrix_by_dimension(df_base: pd.DataFrame, dim_col: str, dim_label: str) -> pd.DataFrame:
+    if df_base.empty or dim_col not in df_base.columns or "__ESTADO_OP__" not in df_base.columns:
+        return pd.DataFrame()
+    d = df_base.copy()
+    d[dim_col] = d[dim_col].fillna("Sin dato").astype(str).replace("", "Sin dato")
+    d["__ESTADO_OP__"] = d["__ESTADO_OP__"].fillna("Sin dato").astype(str).replace("", "Sin dato")
+    pivot = pd.crosstab(d[dim_col], d["__ESTADO_OP__"])
+    pivot["Total general"] = pivot.sum(axis=1)
+    grp = d.groupby(dim_col)["__ESTADO_OP__"]
+    pivot["Cerradas CO"] = grp.apply(lambda ss: ss.apply(is_cumplido_operativo_estado).sum())
+    pivot["Legalizadas OC"] = grp.apply(lambda ss: ss.apply(is_cumplido_legalizado_estado).sum())
+    pivot["Pendientes cierre ICO"] = pivot["Total general"] - pivot["Cerradas CO"]
+    pivot["Pendientes operativos"] = grp.apply(lambda ss: (~ss.apply(lambda x: normalize_text(x) in {"CUMPLIDO OPERATIVO", "CUMPLIDO"})).sum())
+    pivot["ICO Cierre"] = np.where(pivot["Total general"].ne(0), pivot["Cerradas CO"] / pivot["Total general"], 0)
+    pivot["Avance Legalización"] = np.where(pivot["Total general"].ne(0), pivot["Legalizadas OC"] / pivot["Total general"], 0)
+    pivot["% Pendiente ICO"] = np.where(pivot["Total general"].ne(0), pivot["Pendientes cierre ICO"] / pivot["Total general"], 0)
+    pivot = pivot.reset_index().rename(columns={dim_col: dim_label})
+    fixed = [dim_label, "Total general", "Cerradas CO", "Legalizadas OC", "Pendientes cierre ICO", "Pendientes operativos", "ICO Cierre", "Avance Legalización", "% Pendiente ICO"]
+    estado_cols = [c for c in pivot.columns if c not in fixed]
+    ordered_states = [e for e in ["CUMPLIDO", "CUMPLIDO OPERATIVO", "EN PROGRAMACION", "EN TRÁNSITO", "EN TRANSITO", "REPROGRAMADO"] if e in estado_cols]
+    remaining_states = sorted([e for e in estado_cols if e not in ordered_states])
+    ordered = [dim_label] + ordered_states + remaining_states + ["Total general", "Cerradas CO", "Legalizadas OC", "Pendientes cierre ICO", "Pendientes operativos", "ICO Cierre", "Avance Legalización", "% Pendiente ICO"]
+    return pivot[ordered].sort_values(["Pendientes operativos", "Pendientes cierre ICO", "Total general"], ascending=[False, False, False])
+
+
+def closure_matrix_client_person(df_base: pd.DataFrame, person_col: str = "__USUARIO__") -> pd.DataFrame:
+    if df_base.empty or "__CLIENTE__" not in df_base.columns or person_col not in df_base.columns or "__ESTADO_OP__" not in df_base.columns:
+        return pd.DataFrame()
+    d = df_base.copy()
+    d["Cliente"] = d["__CLIENTE__"].fillna("Sin dato").astype(str).replace("", "Sin dato")
+    d["Quien creó"] = d[person_col].fillna("Sin dato").astype(str).replace("", "Sin dato")
+    d["Estado OP"] = d["__ESTADO_OP__"].fillna("Sin dato").astype(str).replace("", "Sin dato")
+    pivot = pd.crosstab([d["Cliente"], d["Quien creó"]], d["Estado OP"])
+    pivot["Total general"] = pivot.sum(axis=1)
+    grp = d.groupby(["Cliente", "Quien creó"])["Estado OP"]
+    pivot["Cerradas CO"] = grp.apply(lambda ss: ss.apply(is_cumplido_operativo_estado).sum())
+    pivot["Legalizadas OC"] = grp.apply(lambda ss: ss.apply(is_cumplido_legalizado_estado).sum())
+    pivot["Pendientes cierre ICO"] = pivot["Total general"] - pivot["Cerradas CO"]
+    pivot["Pendientes operativos"] = grp.apply(lambda ss: (~ss.apply(lambda x: normalize_text(x) in {"CUMPLIDO OPERATIVO", "CUMPLIDO"})).sum())
+    pivot["ICO Cierre"] = np.where(pivot["Total general"].ne(0), pivot["Cerradas CO"] / pivot["Total general"], 0)
+    pivot["Avance Legalización"] = np.where(pivot["Total general"].ne(0), pivot["Legalizadas OC"] / pivot["Total general"], 0)
+    pivot = pivot.reset_index()
+    estado_cols = [c for c in pivot.columns if c not in ["Cliente", "Quien creó", "Total general", "Cerradas CO", "Legalizadas OC", "Pendientes cierre ICO", "Pendientes operativos", "ICO Cierre", "Avance Legalización"]]
+    ordered = ["Cliente", "Quien creó"] + sorted(estado_cols) + ["Total general", "Cerradas CO", "Legalizadas OC", "Pendientes cierre ICO", "Pendientes operativos", "ICO Cierre", "Avance Legalización"]
+    return pivot[ordered].sort_values(["Pendientes operativos", "Pendientes cierre ICO", "Total general"], ascending=[False, False, False])
+
+
+def closure_person_table(df_base: pd.DataFrame, person_col: str = "__USUARIO__") -> pd.DataFrame:
+    return closure_matrix_by_dimension(df_base, person_col, "Quien creó")
+
+
+def closure_by_period(df_base: pd.DataFrame, pcol: str) -> pd.DataFrame:
+    if df_base.empty or pcol not in df_base.columns:
+        return pd.DataFrame()
+    rows = []
+    for per, sub in df_base.groupby(pcol, dropna=False):
+        c = closure_summary(sub)
+        rows.append({pcol: per, "Servicios": c["total"], "Cerradas CO": c["cerrados"], "Legalizadas OC": c["legalizados"], "Pendientes cierre ICO": c["pendientes_ico"], "Pendientes operativos": c["pendientes_operativos"], "ICO Cierre": c["ico"], "Avance Legalización": c["legalizacion"]})
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        order = ordered_periods(out[pcol].astype(str).tolist())
+        out["__ORD__"] = out[pcol].astype(str).map({v: i for i, v in enumerate(order)})
+        out = out.sort_values("__ORD__").drop(columns="__ORD__")
+    return out
+
+
+def estado_kpi_cards(df_base: pd.DataFrame) -> None:
+    counts = estado_counts_dict(df_base)
+    principales = ["CUMPLIDO", "CUMPLIDO OPERATIVO", "EN PROGRAMACION", "EN TRANSITO", "REPROGRAMADO"]
+    labels = {"CUMPLIDO": "Cumplido / OC OK", "CUMPLIDO OPERATIVO": "Cumplido Operativo", "EN PROGRAMACION": "En Programación", "EN TRANSITO": "En Tránsito", "REPROGRAMADO": "Reprogramado"}
+    cols = st.columns(5)
+    for i, estado_norm in enumerate(principales):
+        val = sum(count for estado_raw, count in counts.items() if normalize_text(estado_raw) == estado_norm)
+        with cols[i % 5]:
+            make_kpi(labels[estado_norm], fmt_num(val), "Conteo Estado OP")
+    otros = sum(count for estado_raw, count in counts.items() if normalize_text(estado_raw) not in set(principales))
+    if otros:
+        make_kpi("Otros estados", fmt_num(otros), "Estados diferentes a los principales")
+
+
+
+def add_total_row_closure(tbl: pd.DataFrame, label_col: str) -> pd.DataFrame:
+    """Agrega fila Total general compatible con las métricas nuevas de ICO/Legalización."""
+    if tbl.empty or label_col not in tbl.columns:
+        return tbl
+    total_row = {col: 0 for col in tbl.columns}
+    total_row[label_col] = "Total general"
+    pct_cols = {"ICO Cierre", "Avance Legalización", "% Pendiente ICO", "% Pendiente"}
+    for col in tbl.columns:
+        if col == label_col or col in pct_cols:
+            continue
+        total_row[col] = pd.to_numeric(tbl[col], errors="coerce").fillna(0).sum()
+    total = float(total_row.get("Total general", 0) or 0)
+    cerradas = float(total_row.get("Cerradas CO", total_row.get("Cerradas", 0)) or 0)
+    legalizadas = float(total_row.get("Legalizadas OC", total_row.get("Legalizadas", 0)) or 0)
+    pendientes_ico = float(total_row.get("Pendientes cierre ICO", total_row.get("Pendientes cierre", 0)) or 0)
+    total_row["ICO Cierre"] = cerradas / total if total else 0
+    if "Avance Legalización" in tbl.columns:
+        total_row["Avance Legalización"] = legalizadas / total if total else 0
+    if "% Pendiente ICO" in tbl.columns:
+        total_row["% Pendiente ICO"] = pendientes_ico / total if total else 0
+    if "% Pendiente" in tbl.columns:
+        total_row["% Pendiente"] = pendientes_ico / total if total else 0
+    return pd.concat([tbl, pd.DataFrame([total_row])], ignore_index=True)
+
 # APP
 # =========================
 st.markdown("<div class='main-title'>📊 Informe Gerencial Ejecutivo Operativo y Financiero</div>", unsafe_allow_html=True)
@@ -1495,25 +1714,21 @@ with tabs[8]:
 
 
 with tabs[9]:
-    st.markdown("### KPIs Operativos: OTIF, ICO y Seguimiento por Cliente / Responsable")
-    st.markdown(
-        """
+    st.markdown("### KPIs Operativos: OTIF, ICO y Legalización")
+    st.markdown("""
         <div class='info-box'>
-        <b>Diferencia clave:</b><br>
-        <b>OTIF Operativo</b> mide cumplimiento del servicio: servicios en <b>CUMPLIDO</b> o <b>CUMPLIDO OPERATIVO</b> sobre el total válido.<br>
-        <b>ICO Cierre Operativo</b> mide cierre administrativo mensual: servicios en <b>CUMPLIDO OPERATIVO</b> sobre el total válido.<br>
-        En ambos indicadores se excluye <b>ESTADO OP = ANULADO</b>.
+        <b>OTIF Operativo</b> = (CUMPLIDO + CUMPLIDO OPERATIVO) / Total válido.<br>
+        <b>ICO Cierre Operativo</b> = CUMPLIDO OPERATIVO / Total válido.<br>
+        <b>Avance de Legalización</b> = CUMPLIDO / Total válido.<br>
+        Se excluye completamente <b>ESTADO OP = ANULADO</b>.
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
+        """, unsafe_allow_html=True)
     kpi_op = operational_kpi_summary(df)
     c1, c2, c3, c4 = st.columns(4)
     with c1: make_kpi("OTIF Operativo", fmt_pct(kpi_op["otif"]), kpi_semaforo(kpi_op["otif"]))
-    with c2: make_kpi("Servicios cumplidos", fmt_num(kpi_op["cumplidos"]), "Cumplido + Cumplido Operativo")
-    with c3: make_kpi("ICO Cierre", fmt_pct(kpi_op["ico"]), kpi_semaforo(kpi_op["ico"]))
-    with c4: make_kpi("Pendientes cierre", fmt_num(kpi_op["pendientes_cierre"]), "Diferente a Cumplido Operativo")
+    with c2: make_kpi("ICO Cierre Operativo", fmt_pct(kpi_op["ico"]), kpi_semaforo(kpi_op["ico"]))
+    with c3: make_kpi("Avance Legalización", fmt_pct(kpi_op["legalizacion"]), "Estado: Cumplido / OC OK")
+    with c4: make_kpi("Pendientes operativos", fmt_num(kpi_op["pendientes_operativos"]), "Aún no están Cumplido/CO")
 
     person_col = "__USUARIO__"
     person_label = "Quien creó"
@@ -1521,17 +1736,20 @@ with tabs[9]:
         person_col = "__COORDINADOR__"
         person_label = "Coordinador"
 
+    st.markdown("### Conteo de estados operativos")
+    estado_kpi_cards(df)
+
     st.markdown("### Cliente vs Estado OP")
     cliente_estado = closure_matrix_by_dimension(df, "__CLIENTE__", "Cliente")
     if not cliente_estado.empty:
-        show_table(add_total_row_closure(cliente_estado, "Cliente"), "Matriz Cliente vs Estado OP con ICO", height=520)
+        show_table(add_total_row_closure(cliente_estado, "Cliente"), "Matriz Cliente vs Estado OP", height=540)
     else:
         st.info("No hay datos suficientes para Cliente vs Estado OP.")
 
     st.markdown(f"### {person_label} vs Estado OP")
-    persona_estado = closure_status_matrix(df, person_col)
+    persona_estado = closure_matrix_by_dimension(df, person_col, person_label)
     if not persona_estado.empty:
-        show_table(persona_estado, f"Matriz {person_label} vs Estado OP", height=520)
+        show_table(add_total_row_closure(persona_estado, person_label), f"Matriz {person_label} vs Estado OP", height=540)
     else:
         st.info("No hay datos suficientes para responsable vs Estado OP.")
 
@@ -1540,47 +1758,33 @@ with tabs[9]:
     if not kpi_cliente.empty:
         c5, c6 = st.columns(2)
         with c5:
-            chart_bar(kpi_cliente.sort_values("OTIF Operativo", ascending=False), "Cliente", "OTIF Operativo", "Top Clientes por OTIF Operativo", 20, key="kpi_otif_cliente", ascending=False)
+            chart_bar(kpi_cliente.sort_values("ICO Cierre", ascending=False), "Cliente", "ICO Cierre", "Top Clientes por ICO Cierre Operativo", 20, key="kpi_ico_cliente_final", ascending=False)
         with c6:
-            chart_bar(kpi_cliente.sort_values("ICO Cierre", ascending=False), "Cliente", "ICO Cierre", "Top Clientes por ICO Cierre", 20, key="kpi_ico_cliente", ascending=False)
+            chart_bar(kpi_cliente.sort_values("Avance Legalización", ascending=False), "Cliente", "Avance Legalización", "Top Clientes por Legalización / OC", 20, key="kpi_legalizacion_cliente_final", ascending=False)
         show_table(kpi_cliente, "Tabla KPIs por Cliente", height=520)
-        st.download_button(
-            "Descargar KPIs por Cliente",
-            data=to_excel_bytes(kpi_cliente),
-            file_name="kpis_operativos_por_cliente.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download_kpis_cliente"
-        )
+        st.download_button("Descargar KPIs por Cliente", data=to_excel_bytes(kpi_cliente), file_name="kpis_por_cliente_otif_ico_legalizacion.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_kpis_cliente_final")
 
     st.markdown(f"### KPIs por {person_label}")
     kpi_persona = operational_kpi_by_dimension(df, person_col, person_label)
     if not kpi_persona.empty:
         c7, c8 = st.columns(2)
         with c7:
-            chart_bar(kpi_persona.sort_values("OTIF Operativo", ascending=False), person_label, "OTIF Operativo", f"Top {person_label} por OTIF Operativo", 20, key="kpi_otif_persona", ascending=False)
+            chart_bar(kpi_persona.sort_values("ICO Cierre", ascending=False), person_label, "ICO Cierre", f"Top {person_label} por ICO Cierre", 20, key="kpi_ico_persona_final", ascending=False)
         with c8:
-            chart_bar(kpi_persona.sort_values("Pendientes cierre", ascending=False), person_label, "Pendientes cierre", f"Pendientes de Cierre por {person_label}", 20, key="kpi_pendientes_persona", ascending=False)
+            chart_bar(kpi_persona.sort_values("Pendientes operativos", ascending=False), person_label, "Pendientes operativos", f"Pendientes operativos por {person_label}", 20, key="kpi_pend_oper_persona_final", ascending=False)
         show_table(kpi_persona, f"Tabla KPIs por {person_label}", height=520)
-        st.download_button(
-            f"Descargar KPIs por {person_label}",
-            data=to_excel_bytes(kpi_persona),
-            file_name="kpis_operativos_por_responsable.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download_kpis_persona"
-        )
+        st.download_button(f"Descargar KPIs por {person_label}", data=to_excel_bytes(kpi_persona), file_name="kpis_por_responsable_otif_ico.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_kpis_persona_final")
 
 
 with tabs[10]:
-    st.markdown("### Seguimiento operativo de personal y cierre mensual")
-    st.markdown(
-        """
+    st.markdown("### Seguimiento de Cierre Operativo Mensual - ICO")
+    st.markdown("""
         <div class='info-box'>
-        Regla de negocio: <b>ICO - Índice de Cierre Operativo</b> = servicios con <b>ESTADO OP = CUMPLIDO OPERATIVO</b> / total de servicios válidos no anulados. 
-        Los estados CUMPLIDO, EN PROGRAMACIÓN, EN TRÁNSITO y demás estados diferentes de CUMPLIDO OPERATIVO quedan como pendientes de cierre.
+        <b>Regla oficial:</b> ICO = servicios con <b>ESTADO OP = CUMPLIDO OPERATIVO</b> / total de servicios válidos no anulados.<br>
+        <b>CUMPLIDO</b> se muestra aparte como legalización final / orden de compra OK.<br>
+        <b>EN PROGRAMACIÓN</b>, <b>EN TRÁNSITO</b>, <b>REPROGRAMADO</b> y otros estados se monitorean como pendientes operativos para llevarlos a CUMPLIDO OPERATIVO a corte de fin de mes.
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        """, unsafe_allow_html=True)
 
     cierre = closure_summary(df)
     corte_txt = "Sin fecha"
@@ -1588,14 +1792,20 @@ with tabs[10]:
         corte_txt = pd.to_datetime(cierre["corte"]).strftime("%d/%m/%Y")
 
     k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        make_kpi("ICO Cierre Operativo", fmt_pct(cierre["ico"]), f"Corte: {corte_txt}")
-    with k2:
-        make_kpi("Servicios a cerrar", fmt_num(cierre["total"]), "Total sin anulados")
-    with k3:
-        make_kpi("Remesas cerradas", fmt_num(cierre["cerrados"]), "Estado: Cumplido Operativo")
-    with k4:
-        make_kpi("Pendientes de cierre", fmt_num(cierre["pendientes"]), "No están en Cumplido Operativo")
+    with k1: make_kpi("ICO Cierre Operativo", fmt_pct(cierre["ico"]), f"Corte: {corte_txt}")
+    with k2: make_kpi("Total servicios válidos", fmt_num(cierre["total"]), "Sin anulados")
+    with k3: make_kpi("Cumplido Operativo", fmt_num(cierre["cerrados"]), "Numerador ICO")
+    with k4: make_kpi("Pendientes ICO", fmt_num(cierre["pendientes_ico"]), "Diferente a Cumplido Operativo")
+
+    k5, k6, k7, k8 = st.columns(4)
+    with k5: make_kpi("Cumplido / OC OK", fmt_num(cierre["legalizados"]), fmt_pct(cierre["legalizacion"]))
+    with k6: make_kpi("En Programación", fmt_num(cierre["en_programacion"]), "Debe avanzar a CO")
+    with k7: make_kpi("En Tránsito", fmt_num(cierre["en_transito"]), "Debe avanzar a CO")
+    with k8: make_kpi("Pendientes operativos", fmt_num(cierre["pendientes_operativos"]), "Programación + tránsito + otros")
+
+    st.markdown("### Etiquetas de conteo por Estado OP")
+    estado_kpi_cards(df)
+    st.progress(min(max(float(cierre["ico"]), 0.0), 1.0), text=f"ICO actual: {fmt_pct(cierre['ico'])}")
 
     person_col = "__USUARIO__"
     person_label = "Quien creó"
@@ -1603,111 +1813,62 @@ with tabs[10]:
         person_col = "__COORDINADOR__"
         person_label = "Coordinador"
 
-    st.markdown(f"### Tabla dinámica de cierre por {person_label}")
-    cierre_personal = closure_status_matrix(df, person_col)
-    if not cierre_personal.empty:
-        show_table(cierre_personal, f"Seguimiento operativo: {person_label} vs Estado OP", height=520)
-        st.download_button(
-            "Descargar seguimiento de cierre por personal",
-            data=to_excel_bytes(cierre_personal),
-            file_name="seguimiento_cierre_por_personal.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download_seguimiento_cierre_personal"
-        )
-    else:
-        st.info("No hay datos suficientes para construir el seguimiento por personal.")
-
-    st.markdown("### Seguimiento de cierre por cliente")
-    st.markdown(
-        """
-        <div class='info-box'>
-        Esta matriz permite ver <b>Cliente vs Estado OP</b>. Ayuda a identificar qué cliente tiene más remesas pendientes de cierre y cuál está afectando el cierre mensual.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown("### Cliente vs Estado OP - Seguimiento de cierre")
     cierre_cliente = closure_matrix_by_dimension(df, "__CLIENTE__", "Cliente")
     if not cierre_cliente.empty:
         cierre_cliente_total = add_total_row_closure(cierre_cliente, "Cliente")
-        show_table(cierre_cliente_total, "Cliente vs Estado OP - Seguimiento de cierre", height=560)
-        st.download_button(
-            "Descargar Cliente vs Estado OP",
-            data=to_excel_bytes(cierre_cliente_total),
-            file_name="cliente_vs_estado_op_cierre.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download_cliente_estado_op_cierre"
-        )
-
+        show_table(cierre_cliente_total, "Cliente vs Estado OP - ICO, Legalización y Pendientes", height=600)
+        st.download_button("Descargar Cliente vs Estado OP", data=to_excel_bytes(cierre_cliente_total), file_name="cliente_vs_estado_op_ico_cierre.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_cliente_estado_op_ico_final")
         ccli1, ccli2 = st.columns(2)
         with ccli1:
-            chart_bar(
-                cierre_cliente.sort_values("Pendientes cierre", ascending=False),
-                "Cliente", "Pendientes cierre", "Clientes con más pendientes de cierre", 20,
-                key="clientes_mas_pendientes_cierre", ascending=False
-            )
+            chart_bar(cierre_cliente.sort_values("Pendientes operativos", ascending=False), "Cliente", "Pendientes operativos", "Clientes con más pendientes operativos", 20, key="clientes_pendientes_operativos_final", ascending=False)
         with ccli2:
-            chart_bar(
-                cierre_cliente.sort_values("ICO Cierre", ascending=False),
-                "Cliente", "ICO Cierre", "ICO Cierre por Cliente", 20,
-                key="ico_cierre_cliente", ascending=False
-            )
+            chart_bar(cierre_cliente.sort_values("ICO Cierre", ascending=False), "Cliente", "ICO Cierre", "ICO Cierre Operativo por Cliente", 20, key="ico_cliente_cierre_final", ascending=False)
     else:
         st.info("No hay datos suficientes para construir Cliente vs Estado OP.")
+
+    st.markdown(f"### {person_label} vs Estado OP - Seguimiento operativo de personal")
+    cierre_personal = closure_matrix_by_dimension(df, person_col, person_label)
+    if not cierre_personal.empty:
+        cierre_personal_total = add_total_row_closure(cierre_personal, person_label)
+        show_table(cierre_personal_total, f"{person_label} vs Estado OP", height=600)
+        st.download_button("Descargar seguimiento por personal", data=to_excel_bytes(cierre_personal_total), file_name="quien_creo_vs_estado_op_ico.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_personal_estado_op_ico_final")
+        cper1, cper2 = st.columns(2)
+        with cper1:
+            chart_bar(cierre_personal.sort_values("ICO Cierre", ascending=False), person_label, "ICO Cierre", f"Ranking ICO por {person_label}", 20, key="ranking_ico_personal_final", ascending=False)
+        with cper2:
+            chart_bar(cierre_personal.sort_values("Pendientes operativos", ascending=False), person_label, "Pendientes operativos", f"Pendientes operativos por {person_label}", 20, key="ranking_pend_oper_personal_final", ascending=False)
+    else:
+        st.info("No hay datos suficientes para construir el seguimiento por personal.")
 
     st.markdown("### Cliente + Quien creó vs Estado OP")
     cierre_cliente_persona = closure_matrix_client_person(df, person_col)
     if not cierre_cliente_persona.empty:
-        show_table(cierre_cliente_persona, "Cliente + Quien creó vs Estado OP", height=560)
-        st.download_button(
-            "Descargar Cliente + Quien creó vs Estado OP",
-            data=to_excel_bytes(cierre_cliente_persona),
-            file_name="cliente_quien_creo_vs_estado_op.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download_cliente_persona_estado_op"
-        )
+        show_table(cierre_cliente_persona, "Cliente + Quien creó vs Estado OP", height=600)
+        st.download_button("Descargar Cliente + Quien creó vs Estado OP", data=to_excel_bytes(cierre_cliente_persona), file_name="cliente_quien_creo_vs_estado_op_ico.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_cliente_persona_estado_op_ico_final")
     else:
         st.info("No hay datos suficientes para construir Cliente + Quien creó vs Estado OP.")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        ranking_cierre = closure_person_table(df, person_col)
-        if not ranking_cierre.empty:
-            chart_bar(
-                ranking_cierre[ranking_cierre[person_label if person_label in ranking_cierre.columns else "Quien creó"] != "Total general"] if person_label in ranking_cierre.columns else ranking_cierre,
-                "Quien creó", "ICO Cierre", "Ranking % Cierre por Quien Creó", 20,
-                key="ico_ranking_personal", ascending=False
-            )
-    with c2:
-        pendientes_personal = closure_person_table(df, person_col)
-        if not pendientes_personal.empty:
-            chart_bar(
-                pendientes_personal.sort_values("Pendientes cierre", ascending=False),
-                "Quien creó", "Pendientes cierre", "Pendientes de Cierre por Quien Creó", 20,
-                key="ico_pendientes_personal", ascending=False
-            )
 
     st.markdown("### Evolución del cierre por periodo")
     cierre_periodo = closure_by_period(df_compare if not df_compare.empty else df, pcol)
     if not cierre_periodo.empty:
         c3, c4 = st.columns(2)
         with c3:
-            chart_bar(cierre_periodo, pcol, "ICO Cierre", f"% Cierre - {periodo}", 20, key="ico_periodo", ascending=False)
+            chart_bar(cierre_periodo, pcol, "ICO Cierre", f"ICO Cierre - {periodo}", 20, key="ico_periodo_final", ascending=False)
         with c4:
-            cierre_stack = cierre_periodo.rename(columns={pcol: "Periodo"})
-            show_table(cierre_stack, "Detalle cierre por periodo", height=360)
+            chart_bar(cierre_periodo, pcol, "Avance Legalización", f"Avance Legalización - {periodo}", 20, key="legalizacion_periodo_final", ascending=False)
+        show_table(cierre_periodo.rename(columns={pcol: "Periodo"}), "Detalle cierre por periodo", height=380)
     else:
         st.info("No hay suficientes periodos para mostrar evolución de cierre.")
 
-    st.markdown("### Recomendación de uso para remuneración mensual")
-    st.markdown(
-        """
+    st.markdown("### Recomendación para remuneración mensual")
+    st.markdown("""
         <div class='warn-box'>
-        Para remuneración, usa como indicador principal <b>ICO Cierre</b> por <b>Quien creó</b>, con una regla mínima de volumen. 
-        Ejemplo gerencial: pagar incentivo si el responsable tiene mínimo 50 servicios en el mes y alcanza 95% o más de cierre a corte de fin de mes.
+        Para remuneración, usa <b>ICO Cierre Operativo por Quien creó</b> como indicador principal, con mínimo de volumen mensual. 
+        Ejemplo: mínimo 50 servicios válidos y meta ≥ 95% en Cumplido Operativo a corte de fin de mes. 
+        Complementa con <b>Pendientes operativos</b> y <b>Avance de Legalización</b>.
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        """, unsafe_allow_html=True)
 
 st.markdown("---")
 st.download_button("⬇️ Descargar base filtrada en Excel", to_excel_bytes(df), "base_filtrada_informe_gerencial.xlsx")
