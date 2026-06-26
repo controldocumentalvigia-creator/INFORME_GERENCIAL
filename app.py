@@ -89,6 +89,44 @@ st.markdown(
 )
 
 
+
+
+# =========================
+# ESTILO POWER BI / CAPTURA EJECUTIVA
+# =========================
+st.markdown(
+    """
+    <style>
+    :root {--azul-rey:#004AAD; --azul-oscuro:#003B73; --texto:#0B1220;}
+    [data-testid="stAppViewContainer"] {background:#F4F7FB !important;}
+    [data-testid="stSidebar"] {background:linear-gradient(180deg,#003B73 0%,#005A9C 52%,#003B73 100%) !important;}
+    [data-testid="stSidebar"] label, [data-testid="stSidebar"] span, [data-testid="stSidebar"] div {color:#FFFFFF !important; font-weight:800 !important;}
+    .main-title {color:#003B73 !important; font-weight:950 !important; letter-spacing:.01em;}
+    .subtitle {color:#1F2937 !important; font-weight:750 !important;}
+    .metric-card {
+        background:#FFFFFF !important; border-radius:16px !important; border:1px solid #D7E1EC !important;
+        box-shadow:0 8px 20px rgba(0,59,115,.10) !important; border-left:6px solid #005A9C !important;
+    }
+    .metric-title {color:#002B5B !important; font-weight:950 !important; font-size:.78rem !important;}
+    .metric-value {color:#000000 !important; font-weight:950 !important; font-size:1.52rem !important;}
+    .metric-note {color:#0B1220 !important; font-weight:850 !important;}
+    .card, .section-card {background:#FFFFFF !important; border:1px solid #D7E1EC !important; border-radius:16px !important; box-shadow:0 8px 22px rgba(0,59,115,.08) !important;}
+    h1,h2,h3,h4 {color:#003B73 !important; font-weight:950 !important;}
+    p, span, label, div, td {color:#0B1220 !important;}
+    div[data-testid="stDataFrame"] * {color:#0B1220 !important; font-weight:650 !important;}
+    div[data-testid="stDataFrame"] [role="columnheader"] {background:#004AAD !important; color:#FFFFFF !important; font-weight:950 !important; text-align:center !important;}
+    div[data-testid="stDataFrame"] [role="gridcell"] {color:#0B1220 !important; font-weight:650 !important;}
+    .dataframe thead tr th {background:#004AAD !important; color:white !important; font-weight:950 !important; text-align:center !important;}
+    .dataframe tbody tr td {color:#0B1220 !important; font-weight:650 !important; text-align:center !important;}
+    .dataframe tbody tr:last-child td {background:#004AAD !important; color:white !important; font-weight:950 !important;}
+    .table-title {background:#004AAD; color:white !important; padding:10px 14px; border-radius:12px 12px 0 0; font-weight:950; text-align:center; margin-top:14px;}
+    .insight-box {background:#FFFFFF; border-left:6px solid #004AAD; border-radius:14px; padding:16px 18px; box-shadow:0 8px 20px rgba(0,59,115,.08); font-weight:700; line-height:1.55;}
+    .good {color:#008A3D !important; font-weight:950 !important;} .bad {color:#C00000 !important; font-weight:950 !important;} .neutral {color:#6B7280 !important; font-weight:950 !important;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # =========================
 # TEMA VISUAL OSCURO PARA GRÁFICOS
 # =========================
@@ -684,25 +722,80 @@ def chart_heatmap(data: pd.DataFrame, index: str, columns: str, values: str, tit
         st.dataframe(pivot.style.background_gradient(cmap="RdYlGn", axis=None), use_container_width=True, height=520)
 
 
+def sort_table_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Ordena tablas ejecutivas de mayor a menor por el indicador más importante.
+
+    Mantiene la fila Total general al final cuando exista.
+    """
+    if df is None or df.empty:
+        return df
+    d = df.copy()
+    total_mask = pd.Series(False, index=d.index)
+    for c in d.columns:
+        if d[c].astype(str).str.upper().eq("TOTAL GENERAL").any() or d[c].astype(str).str.upper().eq("TOTAL").any():
+            total_mask = total_mask | d[c].astype(str).str.upper().isin(["TOTAL GENERAL", "TOTAL"])
+    total_rows = d[total_mask].copy()
+    body = d[~total_mask].copy()
+    priority = [
+        "Total general", "Servicios", "Producción", "Facturación", "Margen", "Pendientes operativos",
+        "Pendientes cierre", "Cerradas CO", "Cumplido Operativo", "CUMPLIDO OPERATIVO", "CUMPLIDO", "ICO Cierre",
+        "Cumplimiento de Cierre", "Rentabilidad", "Costos", "Placas", "Conductores"
+    ]
+    sort_col = None
+    for c in priority:
+        if c in body.columns:
+            sort_col = c
+            break
+    if sort_col is None:
+        numeric_cols = [c for c in body.columns if pd.api.types.is_numeric_dtype(body[c])]
+        sort_col = numeric_cols[-1] if numeric_cols else None
+    if sort_col is not None:
+        body["__SORT__"] = pd.to_numeric(body[sort_col], errors="coerce").fillna(-1)
+        body = body.sort_values("__SORT__", ascending=False).drop(columns="__SORT__")
+    if not total_rows.empty:
+        return pd.concat([body, total_rows], ignore_index=True)
+    return body
+
+
+def style_table_for_powerbi(show: pd.DataFrame):
+    """Estilo de tabla visible en capturas: encabezado azul rey, texto oscuro y total azul."""
+    def row_style(row):
+        values = [str(v).upper() for v in row.values]
+        if "TOTAL GENERAL" in values or "TOTAL" in values:
+            return ["background-color:#004AAD; color:white; font-weight:900; text-align:center;" for _ in row]
+        return ["color:#0B1220; font-weight:650; text-align:center;" for _ in row]
+
+    return (
+        show.style
+        .set_table_styles([
+            {"selector":"thead th", "props":[("background-color", "#004AAD"), ("color", "white"), ("font-weight", "900"), ("text-align", "center"), ("font-size", "13px")]},
+            {"selector":"tbody td", "props":[("color", "#0B1220"), ("font-weight", "650"), ("text-align", "center"), ("font-size", "13px")]},
+        ])
+        .apply(row_style, axis=1)
+    )
+
+
 def show_table(df: pd.DataFrame, title: str, height: int = 420) -> None:
-    st.subheader(title)
+    st.markdown(f"<div class='table-title'>{title}</div>", unsafe_allow_html=True)
     if df.empty:
         st.info("Sin datos para mostrar.")
         return
-    show = df.copy()
+    show_raw = sort_table_for_display(df)
+    show = show_raw.copy()
     for col in show.columns:
-        if col in ["Facturación", "Costos", "Margen", "Variación $", "Valor Actual", "Valor Anterior"]:
+        if col in ["Facturación", "Costos", "Margen", "Variación $", "Valor Actual", "Valor Anterior", "Facturación Actual", "Facturación Anterior", "Margen Actual", "Margen Anterior", "Var Facturación $", "Var Margen $"]:
             show[col] = show[col].apply(fmt_cop)
-        elif (col in ["Rentabilidad", "Participación", "Variación %", "Crecimiento", "Var Facturación %", "Var Margen %", "Var Servicios %", "ICO Cierre", "ICO Cierre Operativo", "% Cerrado", "% Pendiente", "% Pendiente operativo", "OTIF Operativo", "Avance Legalización", "% Legalización"] or "%" in str(col) or "ICO" in str(col) or "OTIF" in str(col) or "Legalización" in str(col)):
+        elif (col in ["Rentabilidad", "Participación", "Variación %", "Crecimiento", "Var Facturación %", "Var Margen %", "Var Servicios %", "ICO Cierre", "Cumplimiento de Cierre", "ICO Cierre Operativo", "% Cerrado", "% Pendiente", "% Pendiente operativo", "Pendientes Operativos %", "OTIF Operativo", "Avance Legalización", "% Legalización"] or "%" in str(col) or "ICO" in str(col) or "OTIF" in str(col) or "Legalización" in str(col)):
             show[col] = show[col].apply(fmt_pct)
     if AGGRID_OK:
         gb = GridOptionsBuilder.from_dataframe(show)
         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
-        gb.configure_default_column(filter=True, sortable=True, resizable=True)
+        gb.configure_default_column(filter=True, sortable=True, resizable=True, cellStyle={"color":"#0B1220", "fontWeight":"650", "textAlign":"center"})
+        for c in show.columns:
+            gb.configure_column(c, headerClass="ag-header-cell-label", cellStyle={"color":"#0B1220", "fontWeight":"650", "textAlign":"center"})
         AgGrid(show, gridOptions=gb.build(), height=height, theme="streamlit", fit_columns_on_grid_load=False)
     else:
-        st.dataframe(show, use_container_width=True, height=height)
-
+        st.dataframe(style_table_for_powerbi(show), use_container_width=True, height=height)
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
@@ -1263,6 +1356,7 @@ def closure_by_period(df_base: pd.DataFrame, pcol: str) -> pd.DataFrame:
 
 def estado_kpi_cards(df_base: pd.DataFrame) -> None:
     counts = estado_counts_dict(df_base)
+    total = max(int(len(df_base)), 1)
     principales = ["CUMPLIDO", "CUMPLIDO OPERATIVO", "EN PROGRAMACION", "EN TRANSITO"]
     labels = {
         "CUMPLIDO": "Cumplido / OC OK",
@@ -1273,13 +1367,13 @@ def estado_kpi_cards(df_base: pd.DataFrame) -> None:
     cols = st.columns(4)
     for i, estado_norm in enumerate(principales):
         val = sum(count for estado_raw, count in counts.items() if normalize_text(estado_raw) == estado_norm)
+        pct = val / total if total else 0
         with cols[i % 4]:
-            make_kpi(labels[estado_norm], fmt_num(val), "Conteo Estado OP")
+            make_kpi(labels[estado_norm], fmt_num(val), fmt_pct(pct))
     otros = sum(count for estado_raw, count in counts.items() if normalize_text(estado_raw) not in set(principales))
     if otros:
-        make_kpi("Otros estados", fmt_num(otros), "Estados diferentes a los principales")
-
-
+        pct = otros / total if total else 0
+        make_kpi("Otros estados", fmt_num(otros), fmt_pct(pct))
 
 def add_total_row_closure(tbl: pd.DataFrame, label_col: str) -> pd.DataFrame:
     """Agrega fila Total general compatible con las métricas nuevas de ICO/Legalización."""
@@ -1304,6 +1398,122 @@ def add_total_row_closure(tbl: pd.DataFrame, label_col: str) -> pd.DataFrame:
     if "% Pendiente" in tbl.columns:
         total_row["% Pendiente"] = pendientes_ico / total if total else 0
     return pd.concat([tbl, pd.DataFrame([total_row])], ignore_index=True)
+
+
+# =========================
+# COMPARATIVO EJECUTIVO Y ANÁLISIS CUALITATIVO
+# =========================
+def current_previous_periods(df_scope: pd.DataFrame, df_current: pd.DataFrame, pcol: str) -> Tuple[Optional[str], Optional[str]]:
+    periods_all = ordered_periods([p for p in df_scope[pcol].dropna().astype(str).unique().tolist() if p != "Sin fecha"])
+    periods_current = ordered_periods([p for p in df_current[pcol].dropna().astype(str).unique().tolist() if p != "Sin fecha"])
+    if not periods_all or not periods_current:
+        return None, None
+    curr = periods_current[-1]
+    if curr not in periods_all:
+        curr = periods_all[-1]
+    idx = periods_all.index(curr)
+    prev = periods_all[idx - 1] if idx > 0 else None
+    return curr, prev
+
+
+def calc_totals_for_compare(d: pd.DataFrame) -> Dict[str, float]:
+    total = int(len(d))
+    fact = float(d["__V_CLIENTE__"].sum()) if "__V_CLIENTE__" in d.columns else 0.0
+    cost = float(d["__V_CONDUCT__"].sum()) if "__V_CONDUCT__" in d.columns else 0.0
+    margin = float(d["__MARGEN__"].sum()) if "__MARGEN__" in d.columns else 0.0
+    rent = margin / fact if fact else 0.0
+    op = operational_kpi_summary(d)
+    cierre = closure_summary(d)
+    return {
+        "Servicios": total,
+        "Facturación": fact,
+        "Costos": cost,
+        "Margen": margin,
+        "Rentabilidad": rent,
+        "Cumplimiento de Cierre": cierre.get("ico", 0.0),
+        "Pendientes Operativos %": cierre.get("pendientes_operativos", 0) / total if total else 0.0,
+        "Pendientes Operativos": cierre.get("pendientes_operativos", 0),
+        "OTIF Operativo": op.get("otif", 0.0),
+    }
+
+
+def compare_indicator_table(df_scope: pd.DataFrame, df_current: pd.DataFrame, pcol: str) -> pd.DataFrame:
+    curr, prev = current_previous_periods(df_scope, df_current, pcol)
+    if curr is None or prev is None:
+        return pd.DataFrame()
+    dc = df_scope[df_scope[pcol].astype(str).eq(str(curr))].copy()
+    dp = df_scope[df_scope[pcol].astype(str).eq(str(prev))].copy()
+    cur = calc_totals_for_compare(dc)
+    pre = calc_totals_for_compare(dp)
+    rows = []
+    percent_like = {"Rentabilidad", "Cumplimiento de Cierre", "Pendientes Operativos %", "OTIF Operativo"}
+    for indicador in ["Servicios", "Facturación", "Costos", "Margen", "Rentabilidad", "Cumplimiento de Cierre", "Pendientes Operativos %", "Pendientes Operativos", "OTIF Operativo"]:
+        actual = cur.get(indicador, 0)
+        anterior = pre.get(indicador, 0)
+        variacion = actual - anterior
+        var_pct = variacion / anterior if anterior else (1 if actual else 0)
+        if indicador in percent_like:
+            tendencia = f"{variacion*100:+.2f} pp".replace(".", ",")
+        else:
+            tendencia = variation_arrow(var_pct)
+        favorable = variacion >= 0
+        if indicador in ["Costos", "Pendientes Operativos %", "Pendientes Operativos"]:
+            favorable = variacion <= 0
+        sem = "🟢 Favorable" if favorable else "🔴 Revisar"
+        rows.append({"Indicador": indicador, "Periodo Actual": curr, "Actual": actual, "Periodo Anterior": prev, "Anterior": anterior, "Variación": variacion, "Variación %": var_pct, "Tendencia": tendencia, "Semáforo": sem})
+    return pd.DataFrame(rows)
+
+
+def compare_by_dimension(df_scope: pd.DataFrame, df_current: pd.DataFrame, pcol: str, dim_col: str, dim_label: str) -> pd.DataFrame:
+    curr, prev = current_previous_periods(df_scope, df_current, pcol)
+    if curr is None or prev is None or dim_col not in df_scope.columns:
+        return pd.DataFrame()
+    dc = df_scope[df_scope[pcol].astype(str).eq(str(curr))].copy()
+    dp = df_scope[df_scope[pcol].astype(str).eq(str(prev))].copy()
+    ac = aggregate(dc, [dim_col]).rename(columns={dim_col: dim_label, "Servicios":"Servicios Actual", "Facturación":"Facturación Actual", "Costos":"Costos Actual", "Margen":"Margen Actual", "Rentabilidad":"Rentabilidad Actual"})
+    ap = aggregate(dp, [dim_col]).rename(columns={dim_col: dim_label, "Servicios":"Servicios Anterior", "Facturación":"Facturación Anterior", "Costos":"Costos Anterior", "Margen":"Margen Anterior", "Rentabilidad":"Rentabilidad Anterior"})
+    out = ac.merge(ap, on=dim_label, how="outer").fillna(0)
+    out["Var Servicios"] = out["Servicios Actual"] - out["Servicios Anterior"]
+    out["Var Servicios %"] = np.where(out["Servicios Anterior"].ne(0), out["Var Servicios"] / out["Servicios Anterior"], np.where(out["Servicios Actual"].ne(0), 1, 0))
+    out["Var Facturación $"] = out["Facturación Actual"] - out["Facturación Anterior"]
+    out["Var Facturación %"] = np.where(out["Facturación Anterior"].ne(0), out["Var Facturación $"] / out["Facturación Anterior"], np.where(out["Facturación Actual"].ne(0), 1, 0))
+    out["Var Margen $"] = out["Margen Actual"] - out["Margen Anterior"]
+    out["Var Margen %"] = np.where(out["Margen Anterior"].ne(0), out["Var Margen $"] / out["Margen Anterior"], np.where(out["Margen Actual"].ne(0), 1, 0))
+    out["Var Rentabilidad pp"] = out["Rentabilidad Actual"] - out["Rentabilidad Anterior"]
+    return out.sort_values(["Facturación Actual", "Margen Actual"], ascending=False)
+
+
+def executive_qualitative_text(df_scope: pd.DataFrame, df_current: pd.DataFrame, pcol: str) -> str:
+    curr, prev = current_previous_periods(df_scope, df_current, pcol)
+    totals = calc_totals_for_compare(df_current)
+    if curr is None:
+        return "No hay periodos suficientes para generar análisis ejecutivo con los filtros seleccionados."
+    txt = [f"Durante el periodo <b>{curr}</b> se analizaron <b>{fmt_num(totals['Servicios'])}</b> servicios válidos, con una facturación de <b>{fmt_cop(totals['Facturación'])}</b>, costos por <b>{fmt_cop(totals['Costos'])}</b> y margen de <b>{fmt_cop(totals['Margen'])}</b>. La rentabilidad global fue <b>{fmt_pct(totals['Rentabilidad'])}</b>."]
+    if prev:
+        tbl = compare_indicator_table(df_scope, df_current, pcol)
+        def getrow(ind):
+            r = tbl[tbl["Indicador"].eq(ind)]
+            return r.iloc[0] if not r.empty else None
+        rf = getrow("Facturación"); rm = getrow("Margen"); rc = getrow("Cumplimiento de Cierre"); rp = getrow("Pendientes Operativos")
+        if rf is not None:
+            txt.append(f"Frente al periodo anterior (<b>{prev}</b>), la facturación presentó una variación de <b>{fmt_pct(rf['Variación %'])}</b> ({fmt_cop(rf['Variación'])}).")
+        if rm is not None:
+            txt.append(f"El margen cambió en <b>{fmt_cop(rm['Variación'])}</b>, equivalente a <b>{fmt_pct(rm['Variación %'])}</b>, lo que permite identificar si la operación está mejorando su eficiencia económica.")
+        if rc is not None:
+            txt.append(f"El cumplimiento de cierre se ubicó en <b>{fmt_pct(totals['Cumplimiento de Cierre'])}</b>, con una variación de <b>{(rc['Variación']*100):+.2f} puntos porcentuales</b> frente al periodo anterior.".replace('.', ','))
+        if rp is not None:
+            sentido = "disminuyeron" if rp["Variación"] < 0 else "aumentaron"
+            txt.append(f"Los pendientes operativos {sentido} en <b>{fmt_num(abs(rp['Variación']))}</b> servicios. Para cierre de mes, una reducción de pendientes es favorable.")
+    by_cli = aggregate(df_current, ["__CLIENTE__"]).sort_values("Margen", ascending=False)
+    if not by_cli.empty:
+        top_margin = by_cli.iloc[0]
+        top_rent = by_cli.sort_values("Rentabilidad", ascending=False).iloc[0]
+        txt.append(f"El mayor aporte económico por margen lo genera <b>{top_margin['__CLIENTE__']}</b> con <b>{fmt_cop(top_margin['Margen'])}</b>. El cliente más eficiente porcentualmente es <b>{top_rent['__CLIENTE__']}</b> con rentabilidad de <b>{fmt_pct(top_rent['Rentabilidad'])}</b>.")
+    cierre = closure_summary(df_current)
+    if cierre.get("pendientes_operativos", 0) > 0:
+        txt.append(f"Se recomienda priorizar el cierre de <b>{fmt_num(cierre['pendientes_operativos'])}</b> pendientes operativos, especialmente en estados EN PROGRAMACIÓN y EN TRÁNSITO, para acelerar el paso a CUMPLIDO OPERATIVO.")
+    return " ".join(txt)
+
 
 # APP
 # =========================
@@ -1492,7 +1702,8 @@ tabs = st.tabs([
     "8. Mapa Estratégico",
     "9. Alertas Ejecutivas",
     "10. KPIs Operativos",
-    "11. Cierre Operativo ICO",
+    "11. Cierre Operativo",
+    "12. Comparativo Ejecutivo",
 ])
 
 with tabs[0]:
@@ -1824,17 +2035,23 @@ with tabs[10]:
     if pd.notna(cierre.get("corte")):
         corte_txt = pd.to_datetime(cierre["corte"]).strftime("%d/%m/%Y")
 
+    pendientes_pct = cierre["pendientes_operativos"] / cierre["total"] if cierre["total"] else 0.0
+    cumplido_pct = cierre["legalizados"] / cierre["total"] if cierre["total"] else 0.0
+    co_pct = cierre["cerrados"] / cierre["total"] if cierre["total"] else 0.0
+    prog_pct = cierre["en_programacion"] / cierre["total"] if cierre["total"] else 0.0
+    trans_pct = cierre["en_transito"] / cierre["total"] if cierre["total"] else 0.0
+
     k1, k2, k3, k4 = st.columns(4)
-    with k1: make_kpi("ICO Cierre Operativo", fmt_pct(cierre["ico"]), f"Corte: {corte_txt}")
-    with k2: make_kpi("Total servicios válidos", fmt_num(cierre["total"]), "Sin anulados")
-    with k3: make_kpi("Cumplido Operativo", fmt_num(cierre["cerrados"]), "Numerador ICO")
-    with k4: make_kpi("Pendientes Operativos", fmt_num(cierre["pendientes_operativos"]), "No incluye CUMPLIDO ni CO")
+    with k1: make_kpi("1. Total servicios válidos", fmt_num(cierre["total"]), "Sin anulados")
+    with k2: make_kpi("2. Cumplimiento de cierre", fmt_pct(cierre["ico"]), f"Corte: {corte_txt}")
+    with k3: make_kpi("3. Pendientes operativos (%)", fmt_pct(pendientes_pct), "Programación + tránsito + otros")
+    with k4: make_kpi("4. Pendientes operativos", fmt_num(cierre["pendientes_operativos"]), "Cantidad pendiente")
 
     k5, k6, k7, k8 = st.columns(4)
-    with k5: make_kpi("Cumplido / OC OK", fmt_num(cierre["legalizados"]), fmt_pct(cierre["legalizacion"]))
-    with k6: make_kpi("En Programación", fmt_num(cierre["en_programacion"]), "Debe avanzar a CO")
-    with k7: make_kpi("En Tránsito", fmt_num(cierre["en_transito"]), "Debe avanzar a CO")
-    with k8: make_kpi("Pendientes operativos", fmt_num(cierre["pendientes_operativos"]), "Programación + tránsito + otros")
+    with k5: make_kpi("Cumplido / OC OK", fmt_num(cierre["legalizados"]), fmt_pct(cumplido_pct))
+    with k6: make_kpi("Cumplido Operativo", fmt_num(cierre["cerrados"]), fmt_pct(co_pct))
+    with k7: make_kpi("En Programación", fmt_num(cierre["en_programacion"]), fmt_pct(prog_pct))
+    with k8: make_kpi("En Tránsito", fmt_num(cierre["en_transito"]), fmt_pct(trans_pct))
 
     st.markdown("### Etiquetas de conteo por Estado OP")
     estado_kpi_cards(df)
@@ -1903,6 +2120,48 @@ with tabs[10]:
         <b>Pendientes operativos</b> debe ser el volumen a gestionar: EN PROGRAMACIÓN + EN TRÁNSITO + otros, sin sumar CUMPLIDO.
         </div>
         """, unsafe_allow_html=True)
+
+
+
+with tabs[11]:
+    st.markdown("### Comparativo Ejecutivo: periodo actual vs periodo anterior")
+    st.markdown(f"<div class='insight-box'>{executive_qualitative_text(df_compare if not df_compare.empty else df, df, pcol)}</div>", unsafe_allow_html=True)
+
+    comp_ind = compare_indicator_table(df_compare if not df_compare.empty else df, df, pcol)
+    if not comp_ind.empty:
+        show_table(comp_ind, "Comparativo de indicadores principales", height=430)
+        st.download_button("Descargar comparativo principal", data=to_excel_bytes(comp_ind), file_name="comparativo_indicadores.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_comparativo_indicadores_final")
+    else:
+        st.info("No hay periodo anterior suficiente para comparar con los filtros seleccionados.")
+
+    st.markdown("### Comparativo por dimensión")
+    person_col_cmp = "__USUARIO__" if df["__USUARIO__"].nunique() > 1 else "__COORDINADOR__"
+    person_label_cmp = "Quien creó" if person_col_cmp == "__USUARIO__" else "Coordinador"
+    dim_options = {
+        "Cliente": "__CLIENTE__",
+        person_label_cmp: person_col_cmp,
+        "Estado OP": "__ESTADO_OP__",
+        "Línea de negocio": "__LINEA_NEG__",
+        "Tipo de negocio": "__TIPO_NEGOCIO__",
+        "Placa": "__PLACA__",
+        "Conductor": "__CONDUCTOR__",
+        "Origen": "__ORIGEN__",
+        "Destino": "__DESTINO__",
+        "Tipo vehículo": "__TIPO_VEHICULO__",
+    }
+    dim_label = st.selectbox("Dimensión a comparar", list(dim_options.keys()), index=0, key="dim_comparativo_final")
+    comp_dim = compare_by_dimension(df_compare if not df_compare.empty else df, df, pcol, dim_options[dim_label], dim_label)
+    if not comp_dim.empty:
+        show_table(comp_dim.head(100), f"Comparativo por {dim_label} - Actual vs Anterior", height=600)
+        c1, c2 = st.columns(2)
+        with c1:
+            chart_bar(comp_dim.sort_values("Var Facturación $", ascending=False), dim_label, "Var Facturación $", f"Mayor crecimiento de facturación por {dim_label}", 20, key="comp_var_fact_pos_final", ascending=False)
+        with c2:
+            chart_bar(comp_dim.sort_values("Var Margen $", ascending=False), dim_label, "Var Margen $", f"Mayor crecimiento de margen por {dim_label}", 20, key="comp_var_margen_pos_final", ascending=False)
+        st.download_button("Descargar comparativo por dimensión", data=to_excel_bytes(comp_dim), file_name=f"comparativo_{dim_label}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_comparativo_dimension_final")
+    else:
+        st.info("No hay datos suficientes para comparar esta dimensión.")
+
 
 st.markdown("---")
 st.download_button("⬇️ Descargar base filtrada en Excel", to_excel_bytes(df), "base_filtrada_informe_gerencial.xlsx")
