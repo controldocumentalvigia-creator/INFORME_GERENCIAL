@@ -1,17 +1,37 @@
 # Informe Gerencial Ejecutivo - Streamlit Cloud
 
-Archivos requeridos en la raíz del repositorio:
+Aplicación ejecutiva para análisis operativo, financiero, rentabilidad, cierre operativo y comparativo de periodos.
+
+## Archivos requeridos
+
 - app.py
 - requirements.txt
 - runtime.txt
 - .streamlit/config.toml
 
-Importante:
-- Esta versión NO instala streamlit-aggrid para evitar errores de instalación en Streamlit Cloud.
-- La app usa tablas nativas de Streamlit si AgGrid no está disponible.
-- Permite cargar bases Excel/CSV desde la barra lateral.
+## Despliegue en Streamlit Cloud
 
-Después de subir cambios a GitHub:
-1. Streamlit Cloud > Manage app.
-2. Clear cache.
-3. Reboot app.
+1. Subir estos archivos al repositorio en GitHub.
+2. Crear nueva app en Streamlit Cloud.
+3. Main file path: app.py
+4. Python: definido por runtime.txt como python-3.11.
+5. Clear cache and reboot si se actualizan paquetes.
+
+## Formatos soportados
+
+- .xlsx
+- .xlsm
+- .xls (requiere xlrd, incluido)
+- .csv
+
+## KPIs clave
+
+- OTIF Operativo = CUMPLIDO / total de servicios válidos no anulados.
+- Cumplimiento de Cierre = CUMPLIDO OPERATIVO / total de servicios válidos no anulados.
+- Pendientes Operativos = estados diferentes de CUMPLIDO y CUMPLIDO OPERATIVO.
+- Margen = V.CLIENTE - V.CONDUCT.
+- Rentabilidad = Margen / V.CLIENTE.
+
+## Versión
+
+Versión final Power BI style, optimizada para bases de 20.000+ registros.
